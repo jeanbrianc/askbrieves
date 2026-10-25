@@ -11,7 +11,11 @@ jobs:
         with:
           python-version: '3.13'
           cache: pip
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
       - run: pip install -r requirements-dev.txt
       - run: python -m pytest -q
+      - run: node --test tests/web_session.test.cjs
       - run: cfn-lint infra/bootstrap.json infra/service.json
       - run: python scripts/package.py
