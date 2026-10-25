@@ -491,3 +491,29 @@ test("an old request's finally cannot release the newer request's cancellation h
   assert.deepEqual(ui.snapshot(), before);
   assertEmpty(ui);
 });
+
+test("follow-up references are kept within a chat and cleared by reset boundaries", async () => {
+  const f = fixture();
+  await f.connect(OWNER);
+  let pending = f.submit("10-year Treasury yield?");
+  f.requests.at(-1).respond({answer: "Synthetic yield", context_id: "synthetic-context"});
+  await pending;
+  pending = f.submit("a day after that?");
+  assert.equal(JSON.parse(f.requests.at(-1).options.body).context_id, "synthetic-context");
+  f.requests.at(-1).respond({answer: "Synthetic decline", status: "declined"});
+  await pending;
+  pending = f.submit("what about last month?");
+  assert.equal(JSON.parse(f.requests.at(-1).options.body).context_id, "synthetic-context");
+  f.requests.at(-1).respond({answer: "Synthetic peak", context_id: "next-context"});
+  await pending;
+  await f.emit("clear-button", "click");
+  pending = f.submit("a day after that?");
+  assert.equal(JSON.parse(f.requests.at(-1).options.body).context_id, undefined);
+  f.requests.at(-1).respond({answer: "Need context", context_id: "old-context"});
+  await pending;
+  await f.connect(REVIEWER);
+  pending = f.submit("a day after that?");
+  assert.equal(JSON.parse(f.requests.at(-1).options.body).context_id, undefined);
+  f.requests.at(-1).respond({answer: "Need context"});
+  await pending;
+});

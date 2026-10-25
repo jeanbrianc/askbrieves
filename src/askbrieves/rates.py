@@ -230,3 +230,40 @@ def fetch_yields(
             "description": DESCRIPTION,
         })
     return results[0] if len(results) == 1 else {"observations": results, "description": DESCRIPTION}
+
+
+def fetch_monthly_peak(maturity: str, month: str, today: date | None = None) -> dict:
+    """Calculate a peak from one bounded month of validated published observations."""
+    today = today or datetime.now(ZoneInfo("America/New_York")).date()
+    if (not isinstance(maturity, str) or maturity not in MATURITY_FIELDS
+            or not isinstance(month, str) or not re.fullmatch(r"[0-9]{4}-[0-9]{2}", month)):
+        raise RatesUnavailable("Request one supported maturity and a YYYY-MM month.")
+    try:
+        period = date.fromisoformat(month + "-01")
+    except ValueError as exc:
+        raise RatesUnavailable("Invalid Treasury month.") from exc
+    if not EARLIEST_DATE.replace(day=1) <= period <= today.replace(day=1):
+        raise RatesUnavailable("Treasury month must be between January 1990 and this month.")
+    month_key = period.strftime("%Y%m")
+    rows = _observations(_download(FEED_BASE + month_key))
+    seen, available = set(), []
+    missing = 0
+    for as_of, properties in rows:
+        if as_of.strftime("%Y%m") != month_key or as_of in seen or as_of > today or as_of < EARLIEST_DATE:
+            raise RatesUnavailable("Treasury returned inconsistent observation dates.")
+        seen.add(as_of)
+        try:
+            available.append((as_of, Decimal(_yield_value(properties, maturity))))
+        except RatesNotPublished:
+            missing += 1
+    if not available:
+        raise RatesNotPublished(f"Treasury has no published {maturity} yields for {month}.")
+    peak = max(value for _, value in available)
+    return {"month": month, "maturity": maturity, "peak_yield": format(peak, ".2f"),
+            "peak_dates": sorted(as_of.isoformat() for as_of, value in available if value == peak),
+            "observations_count": len(available), "missing_maturity_count": missing,
+            "first_observation": min(as_of for as_of, _ in available).isoformat(),
+            "last_observation": max(as_of for as_of, _ in available).isoformat(),
+            "month_to_date": period == today.replace(day=1),
+            "source_url": SOURCE_BASE + month_key, "data_url": FEED_BASE + month_key,
+            "description": DESCRIPTION}

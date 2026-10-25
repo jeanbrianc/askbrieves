@@ -13,12 +13,15 @@ from decimal import Decimal
 
 from askbrieves import storage
 from askbrieves.knowledge import curve_answer, explain_concept
-from askbrieves.planner import POLICY_VERSION, PlannerUnavailable, plan_question
-from askbrieves.rates import RatesNotPublished, RatesUnavailable, fetch_yields
+from askbrieves.planner import POLICY_VERSION, PlannerUnavailable, plan_question, validated_context
+from askbrieves.rates import RatesNotPublished, RatesUnavailable, fetch_yields, fetch_monthly_peak
 
-DECLINED = ("I can help with current or historical U.S. Treasury yields. "
-            "Include a maturity and a full date, or say latest. "
-            "I cannot provide forecasts, investment advice, secrets, or unrelated answers.")
+DECLINE_MESSAGES = {
+    "ambiguous": 'I need a maturity and date or month to resolve that. Try “10-year Treasury yield on October 24, 2025” or “peak 10-year yield in October 2025”. For follow-ups, first ask a complete question in this chat.',
+    "unsupported": 'I support daily U.S. Treasury par yields, comparisons on up to two dates, and a monthly peak for one maturity. Try “peak 10-year Treasury yield in October 2025”. Period averages, forecasts and other rate products are not supported.',
+    "unsafe": 'I cannot provide secrets, follow instructions to bypass safeguards, or give investment advice. I can show Treasury yields or explain concepts such as yield spreads.',
+    "out_of_scope": 'I can help with U.S. Treasury yields and rate concepts. Try “What is a basis point?” or “What is the latest 10-year Treasury yield?”.',
+}
 SECRET_PATTERN = re.compile(r"\b(?:sk-[A-Za-z0-9_-]{16,}|(?:AKIA|ASIA)[A-Z0-9]{16})\b")
 PUBLIC_ASSETS = {"/": ("index.html", "text/html; charset=utf-8"),
                  "/app.js": ("app.js", "text/javascript; charset=utf-8"),
@@ -40,7 +43,7 @@ def response(status, body, request_id, text=False):
         "body": body if text else json.dumps(body, default=str)}
 
 
-def read_question(event):
+def read_payload(event):
     if event.get("queryStringParameters"):
         raise InvalidQuestion("Query parameters are not supported")
     headers = {k.lower(): v for k, v in event.get("headers", {}).items()}
@@ -56,8 +59,12 @@ def read_question(event):
         parsed = json.loads(raw)
     except (ValueError, UnicodeError, binascii.Error) as exc:
         raise InvalidQuestion("Invalid JSON body") from exc
-    if not isinstance(parsed, dict) or set(parsed) != {"question"}:
-        raise InvalidQuestion("Provide exactly one field: question")
+    if not isinstance(parsed, dict) or "question" not in parsed or set(parsed) - {"question", "context_id"}:
+        raise InvalidQuestion("Provide question and optional context_id")
+    context_id = parsed.get("context_id")
+    if context_id is not None and (not isinstance(context_id, str) or not re.fullmatch(
+            r"[0-9T:.+Z-]{20,40}#[0-9a-f-]{36}", context_id)):
+        raise InvalidQuestion("Invalid context reference")
     question = parsed["question"]
     if not isinstance(question, str) or not 1 <= len(question.strip()) <= 500:
         raise InvalidQuestion("Question must be between 1 and 500 characters")
@@ -65,7 +72,11 @@ def read_question(event):
         raise InvalidQuestion("Control characters are not supported")
     if SECRET_PATTERN.search(question):
         raise InvalidQuestion("Do not submit credentials or personal information")
-    return question.strip()
+    return question.strip(), context_id
+
+
+def read_question(event):
+    return read_payload(event)[0]
 
 
 def answer_from_evidence(evidence, maturities):
@@ -91,13 +102,35 @@ def answer_from_evidence(evidence, maturities):
     return " ".join(paragraphs) + " These are daily U.S. Treasury par yields, not live quotes or deposit APYs. " + citation
 
 
-def process_question(question, request_id, now, principal="owner"):
+def peak_answer(evidence):
+    maturity = evidence["maturity"]
+    label = f"{maturity[:-1]}-{'month' if maturity.endswith('m') else 'year'}"
+    period = evidence["month"] + (" (month to date)" if evidence["month_to_date"] else "")
+    return (f"The peak published daily {label} Treasury par yield in {period} was "
+            f"{evidence['peak_yield']}%, on {', '.join(evidence['peak_dates'])}. "
+            f"Based on {evidence['observations_count']} published observations from "
+            f"{evidence['first_observation']} through {evidence['last_observation']}; "
+            f"{evidence['missing_maturity_count']} published rows lacked this maturity. "
+            "This is a daily par-yield maximum, not an intraday high. Source: " + evidence["source_url"])
+
+
+def process_question(question, request_id, now, principal="owner", context_id=None):
+    context = None
+    if context_id is not None:
+        context = storage.conversation_context(context_id, principal, now)
+        if context is not None:
+            context = validated_context(context)
     storage.claim_request(now)
     item = storage.start_history(request_id, question, now, principal=principal)
+    plan = None
     try:
-        plan = plan_question(question, storage.secret(os.environ["OPENAI_SECRET_ARN"], "api_key"))
+        key = storage.secret(os.environ["OPENAI_SECRET_ARN"], "api_key")
+        plan = plan_question(question, key, context=context) if context is not None else plan_question(question, key)
         if plan["action"] == "decline":
-            result = {"status": "declined", "answer": DECLINED, "reason": plan["reason"]}
+            result = {"status": "declined", "answer": DECLINE_MESSAGES[plan["reason"]], "reason": plan["reason"]}
+        elif plan["action"] == "peak":
+            evidence = fetch_monthly_peak(plan["maturity"], plan["month"])
+            result = {"status": "answered", "answer": peak_answer(evidence), "evidence": evidence}
         elif plan["action"] == "explain":
             result = {"status": "answered", **explain_concept(plan["topic"])}
         elif plan["action"] == "curve":
@@ -109,11 +142,20 @@ def process_question(question, request_id, now, principal="owner"):
                       "evidence": evidence}
         code = 200
     except RatesNotPublished as exc:
-        result = {"status": "no_data", "answer": str(exc) + " Please choose another date or maturity."}
+        result = {"status": "no_data", "answer": str(exc) + " Please choose another date or maturity. Weekends and holidays may have no observation; "
+                  "I do not substitute a nearby day. Try an explicit business date, or ask for a monthly peak."}
         code = 200
     except (PlannerUnavailable, RatesUnavailable):
         result = {"status": "unavailable", "answer": "I could not verify the requested Treasury data safely. Please retry later."}
         code = 503
+    if plan and plan["action"] != "decline" and result["status"] in ("answered", "no_data"):
+        selection = dict(plan)
+        evidence = result.get("evidence", {})
+        if selection["action"] in ("lookup", "curve") and evidence:
+            selection["dates"] = list(dict.fromkeys(o["as_of"] for o in evidence.get("observations", [evidence])))
+        result["selection"] = selection
+        if isinstance(item.get("sk"), str):
+            result["context_id"] = item["sk"]
     result["policy_version"] = POLICY_VERSION
     # A successful API response requires a durable history record. Failure propagates.
     storage.finish_history(item, result)
@@ -156,14 +198,15 @@ def lambda_handler(event, context):
         if method == "GET":
             status, outcome = 200, "history"
             return response(status, {"items": storage.recent_history(principal=principal), "limit": 20}, request_id)
-        question = read_question(event)
-        status, body = process_question(question, request_id, datetime.now(timezone.utc), principal=principal)
+        question, context_id = read_payload(event)
+        status, body = process_question(question, request_id, datetime.now(timezone.utc), principal=principal,
+                                        context_id=context_id)
         outcome = body["status"]
         return response(status, body, request_id)
     except InvalidQuestion:
         # Only input-validation messages are returned; secret/config errors stay private.
         status, outcome = 400, "invalid_request"
-        return response(status, {"error": "Invalid request. Use JSON with one question of 1-500 characters; do not include secrets."}, request_id)
+        return response(status, {"error": "Invalid request. Use JSON with a question of 1-500 characters and optional context_id; do not include secrets."}, request_id)
     except storage.RequestLimitExceeded:
         status, outcome = 429, "review_limit_exceeded"
         return response(status, {"error": "Review request allowance exhausted. It does not reset daily.",

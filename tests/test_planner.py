@@ -35,7 +35,7 @@ def test_constrained_latest_lookup_and_decline():
 def test_exact_dates_and_bounded_comparisons_are_preserved(dates):
     result = planner.parse_plan(decision(arguments=lookup_args(["2y", "10y"], dates)), today=TODAY)
     assert result == {"action": "lookup", "maturities": ["2y", "10y"], "dates": dates}
-    assert planner.POLICY_VERSION == "treasury-review-v3"
+    assert planner.POLICY_VERSION == "treasury-conversation-v4"
 
 
 @pytest.mark.parametrize("dates", [
@@ -105,7 +105,7 @@ def test_provider_request_has_hard_cap_no_storage_and_no_general_tools(monkeypat
     assert payload["max_output_tokens"] == 256
     assert payload["tool_choice"] == "required"
     assert {tool["name"] for tool in payload["tools"]} == {
-        "lookup_treasury_yields", "decline_question", "explain_rate_concept", "assess_yield_curve"}
+        "lookup_treasury_yields", "decline_question", "explain_rate_concept", "assess_yield_curve", "monthly_peak_treasury_yield"}
     assert all(tool["strict"] and not tool["parameters"]["additionalProperties"] for tool in payload["tools"])
     lookup = payload["tools"][0]["parameters"]
     assert set(lookup["required"]) == {"maturities", "dates"}

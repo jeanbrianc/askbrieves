@@ -130,3 +130,23 @@ def recent_history(now=None, principal="owner"):
                            Limit=20, ScanIndexForward=False, ConsistentRead=True)
     return [{k: v for k, v in item.items() if k not in ("pk", "sk", "expires_at")}
             for item in result.get("Items", [])]
+
+
+def conversation_context(context_id, principal, now):
+    """Resolve a single audience-scoped selection; never load a transcript."""
+    try:
+        created, request_id = context_id.split("#")
+        timestamp = datetime.fromisoformat(created)
+        if (timestamp.utcoffset() is None or not 0 <= (now - timestamp).total_seconds() <= 1800
+                or not re.fullmatch(r"[0-9a-f-]{36}", request_id)):
+            return None
+    except (ValueError, TypeError, AttributeError):
+        return None
+    result = table().query(
+        KeyConditionExpression=Key("pk").eq(_history_partition(principal)) & Key("sk").eq(context_id),
+        ProjectionExpression="selection, #s", ExpressionAttributeNames={"#s": "status"},
+        ConsistentRead=True, Limit=1)
+    items = result.get("Items", [])
+    if not items or items[0].get("status") not in ("answered", "no_data"):
+        return None
+    return items[0].get("selection")
