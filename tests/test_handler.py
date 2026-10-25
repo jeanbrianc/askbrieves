@@ -31,6 +31,8 @@ def deps(monkeypatch):
         mock = Mock()
         monkeypatch.setattr(handler.storage, name, mock)
         dependencies[name] = mock
+    dependencies["auth"] = Mock(side_effect=lambda value: "owner" if value == TOKEN else None)
+    monkeypatch.setattr(handler.storage, "authenticate_token", dependencies["auth"])
     dependencies["secret"].side_effect = lambda arn, field: TOKEN if field == "token" else "provider-key"
     dependencies["start_history"].return_value = {"status": "pending"}
     dependencies["recent_history"].return_value = []
@@ -151,6 +153,8 @@ def test_invalid_secret_is_server_failure_without_private_details(deps, field, c
             raise ValueError("invalid secret payload: private-value")
         return TOKEN
     deps["secret"].side_effect = invalid_secret
+    if field == "token":
+        deps["auth"].side_effect = ValueError("invalid secret payload: private-value")
     result = handler.lambda_handler(event(), None)
     assert result["statusCode"] == 503
     assert "private-value" not in result["body"]
@@ -198,7 +202,7 @@ def test_historical_question_uses_requested_date_and_persists_provenance(deps):
     assert "2025-10-23" in body["answer"] and "4.01%" in body["answer"]
     deps["fetch"].assert_called_once_with(["10y"], dates=["2025-10-23"])
     assert deps["finish_history"].call_args.args[1]["evidence"] == evidence
-    assert body["policy_version"] == "treasury-dates-v2"
+    assert body["policy_version"] == "treasury-review-v3"
 
 
 @pytest.mark.parametrize("reverse,expected", [(False, "+99"), (True, "-99")])
@@ -237,3 +241,35 @@ def test_unpublished_result_requires_durable_history_too(deps):
     deps["fetch"].side_effect = RatesNotPublished("No published observation.")
     deps["finish_history"].side_effect = RuntimeError("history unavailable")
     assert handler.lambda_handler(event(), None)["statusCode"] == 503
+
+
+def test_reviewer_identity_controls_both_history_and_question_storage(deps):
+    deps["auth"].side_effect = None
+    deps["auth"].return_value = "reviewer"
+    request = event("GET", "/history")
+    request["queryStringParameters"] = {"principal": "owner"}
+    assert handler.lambda_handler(request, None)["statusCode"] == 200
+    deps["recent_history"].assert_called_once_with(principal="reviewer")
+    assert handler.lambda_handler(event(), None)["statusCode"] == 200
+    assert deps["start_history"].call_args.kwargs["principal"] == "reviewer"
+
+
+def test_concept_answer_is_fixed_and_does_not_fetch_rate_data(deps):
+    deps["plan"].return_value = {"action": "explain", "topic": "basis_point"}
+    result = handler.lambda_handler(event(question="What is a basis point?"), None)
+    body = json.loads(result["body"])
+    assert result["statusCode"] == 200 and body["status"] == "answered"
+    assert "0.01 percentage point" in body["answer"]
+    assert body["evidence"]["topic"] == "basis_point"
+    deps["fetch"].assert_not_called()
+    deps["finish_history"].assert_called_once()
+
+
+def test_curve_assessment_uses_only_fixed_two_tenor_benchmark(deps):
+    deps["plan"].return_value = {"action": "curve", "dates": ["latest"]}
+    deps["fetch"].return_value = {"as_of": "2026-10-23", "rates": {"2y": "4.69", "10y": "5.00"},
+        "source_url": "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/TextView?type=daily_treasury_yield_curve&field_tdr_date_value_month=202610"}
+    result = handler.lambda_handler(event(question="Is the yield curve inverted?"), None)
+    assert result["statusCode"] == 200
+    assert "upward sloping" in json.loads(result["body"])["answer"]
+    deps["fetch"].assert_called_once_with(["2y", "10y"], dates=["latest"])

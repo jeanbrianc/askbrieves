@@ -6,7 +6,7 @@ Open the chat at **https://askbrieves.brianjeanbuilds.com**. The page, its asset
 
 ## Try it
 
-Visit the site, write a question, and use **Access** to enter the demo bearer token obtained privately from Brian. This is not an OpenAI API key. The single-screen chat uses Brian's supplied mascot/logo, two example prompts, and a bottom composer. The token stays in page memory only, without browser storage or cookies. Token holders share the same read-only history view.
+Visit the site, write a question, and use **Access** to enter the demo bearer token obtained privately from Brian. This is not an OpenAI API key. The single-screen chat uses Brian's supplied mascot/logo, two example prompts, and a bottom composer. The token stays in page memory only, without browser storage or cookies. Owner and reviewer history are separate; people sharing the reviewer credential share only that audience's history.
 
 The command-line client is also available. Python 3.13+ is sufficient; no packages are required. It prompts for the token without echoing it, so it does not enter shell history.
 
@@ -16,6 +16,8 @@ python3 scripts/client.py "Compare the 2-year and 10-year Treasury yields"
 python3 scripts/client.py "What was the 10 year rate on October 23rd, 2025?"
 python3 scripts/client.py "Compare the 2-year and 10-year Treasury yields on October 23rd, 2025"
 python3 scripts/client.py "Compare the 10-year Treasury yield on 2025-10-23 with the latest yield"
+python3 scripts/client.py "What is a basis point?"
+python3 scripts/client.py "Is the yield curve inverted?"
 python3 scripts/client.py --history
 curl --fail https://askbrieves.brianjeanbuilds.com/health
 ```
@@ -43,9 +45,11 @@ flowchart LR
 ```
 
 1. Authenticate, validate a body of at most 4 KiB and a question of at most 500 characters, atomically claim one of 100 daily attempts, and save a pending history entry.
-2. Make **one** OpenAI Responses API call. A strict function schema offers only `lookup_treasury_yields` and `decline_question`. The model reviews the entire question and chooses an action. Python independently validates tool count, names, fields, maturity enums, and date bounds.
+2. Make **one** OpenAI Responses API call. Strict function schemas offer rate lookup, a reviewed concept explanation, a fixed 2-year/10-year curve assessment, or decline. The model reviews the entire question and chooses an action. Python independently validates tool count, names, fields, topic/maturity enums, and date bounds.
 3. Execute the fixed Treasury adapter with at most three monthly downloads per request: two requested months and, if needed, a previous-month fallback for latest. Latest observations must be no more than seven calendar days old and never in the future. Historical lookups select the exact requested row, with no weekend or holiday substitution. Missing observations or tenors return `no_data`; invalid source data fails closed. Each comparison uses the requested maturities from the same dated row.
 4. Format the answer and any basis-point spread in Python, then persist the result **before** returning it. The model supplies neither numeric rates nor arbitrary final prose.
+
+The service also explains basis points, Treasury yields, yield curves, inversion, spreads, yield versus APY, and federal-funds versus Treasury rates. These are fixed, reviewed explanations with official references, not model-written advice. Curve assessments calculate the 2-year/10-year segment from verified observations; they do not forecast recessions or describe every point on the curve. Current Fed policy-rate quotes remain outside the data scope.
 
 This is a constrained, single-step tool-using agent. An open-ended loop, vector database, multi-agent framework, and a second LLM answer-writing call add little value here. The final answer is grounded by construction, even if the probabilistic scope gate makes a mistake. The model cannot read history, retrieve AWS resources, browse a submitted URL, or execute code.
 
@@ -65,8 +69,8 @@ Each question is sent to the OpenAI Responses API using the server-side project 
 
 | Control | Implementation and boundary |
 |---|---|
-| Access | Generated 48-character bearer secret, constant-time comparison, HTTPS only. One shared demo audience; holders can read all demo history. No tenant isolation claim. |
-| Agent authority | One model call; two schema-constrained actions; no generic tools; local validation; fixed numeric/prose output path. Scope classification is probabilistic, not a formal guarantee. |
+| Access | Generated 48-character owner credential; optional expiring reviewer credential. Constant-time comparison and HTTPS. Reviewers cannot choose or read the owner's history partition. Reviewer access is a temporary demo convenience, not a production identity system. |
+| Agent authority | One model call; schema-constrained lookup, explanation, curve assessment or decline; no generic tools; local validation; fixed numeric/prose output path. Scope classification is probabilistic, not a formal guarantee. |
 | Data integrity | Fixed Treasury host/path, redirects disabled, XML DTD/entities rejected, 1 MiB source cap, locally validated dates, exact historical observations, freshness checks for latest, decimal arithmetic. Missing data is reported explicitly; no invented fallback rates. |
 | Cost containment | API target 1 request/second, burst 2; global atomic 100 attempts per UTC day; one model call with 256 output tokens; at most three monthly source downloads; no automatic provider retry. Lambda shares existing account concurrency capacity by default. Refusals, no-data results, and failed attempts consume quota. Gateway throttling is best effort; this is not a hard dollar cap. |
 | Secrets / IAM | Secret ARNs in config, values fetched only by runtime, 60-second cache. Function permissions name its two secrets, its one table, and its log group. No trading, account access, or general AWS authority. |
@@ -98,8 +102,10 @@ The default `ReservedConcurrency=-1` omits a Lambda reservation and shares exist
 
 Get the generated demo token privately from the stack's `ApiAccessSecretArn` output in the Secrets Manager console. Do not put the token in tickets, screenshots, commands, or deployment files. The client accepts a hidden prompt; CI tests mock dependencies. For a live acceptance test, inject `ASKBRIEVES_TOKEN` into the process securely and run `python scripts/smoke.py`. See [operations](docs/operations.md) for rotation, incident handling, rollback, and teardown.
 
+Optional reviewer access uses `reviewer_token` and integer UTC epoch `reviewer_expires_at` fields in the same secret, preserving the existing owner `token`. Reviewer tokens accept 12–512 characters and require a future expiry; owner tokens remain 20–512 characters. Distribute values privately, never through this public repository. Both audiences share the global daily allowance. A memorable reviewer credential is suitable only for a short-lived, bounded demo; use high-entropy credentials for production.
+
 ## Operational choices and next steps
 
 Costs come from API/Lambda requests, DynamoDB requests/storage/PITR, two Secrets Manager secrets, logs, alarms, artifacts, and DNS. There is no NAT gateway, VPC, load balancer, container host, or database instance. The pinned model is `gpt-5.4-mini-2026-03-17`, with reasoning disabled for this small classification task. Review [current model pricing](https://developers.openai.com/api/docs/models/gpt-5.4-mini) and AWS pricing before raising the quota. Project budget alerts are useful but are not an application spending cutoff; unauthenticated traffic can still incur AWS request costs.
 
-For the 4–6 hour assignment, I prioritized deployability, explicit security boundaries, negative tests, and a usable runbook. Before a real multi-client rollout I would replace the shared token with per-client identities/history partitions, add WAF or an appropriate edge control and per-client quotas, connect alarms to an owned paging channel, define measured availability/latency SLOs, and add managed synthetic checks and a proper policy evaluation dataset. A multi-region system and an institutional compliance program are beyond this demo's scope.
+For the 4–6 hour assignment, I prioritized deployability, explicit security boundaries, negative tests, and a usable runbook. Before a real multi-client rollout I would replace audience credentials with per-client identity and authorization, add WAF or an appropriate edge control and per-client quotas, connect alarms to an owned paging channel, define measured availability/latency SLOs, and add managed synthetic checks and a proper policy evaluation dataset. A multi-region system and an institutional compliance program are beyond this demo's scope.

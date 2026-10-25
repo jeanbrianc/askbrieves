@@ -29,7 +29,8 @@
     if (typeof raw !== "string") return null;
     try {
       const url = new URL(raw);
-      if (url.protocol === "https:" && url.hostname === "home.treasury.gov" && !url.username && !url.password && !url.port && url.pathname.startsWith("/resource-center/data-chart-center/interest-rates/")) {
+      const officialHosts = ["home.treasury.gov", "www.federalreserve.gov", "www.investor.gov", "libertystreeteconomics.newyorkfed.org"];
+      if (url.protocol === "https:" && officialHosts.includes(url.hostname) && !url.username && !url.password && !url.port) {
         // Older saved answers cite the XML feed. Open the readable table instead.
         if (url.pathname.endsWith("/pages/xml") && url.searchParams.get("data") === "daily_treasury_yield_curve") {
           const month = url.searchParams.get("field_tdr_date_value_month");
@@ -52,7 +53,8 @@
     const body = document.createElement("p");
     const evidence = details.evidence;
     const observations = evidence && Array.isArray(evidence.observations) ? evidence.observations.slice(0, 2) : evidence ? [evidence] : [];
-    const sourceUrls = [...new Set(observations.filter((item) => item && safeSource(item.source_url)).map((item) => item.source_url))];
+    const references = (item) => Array.isArray(item.source_urls) ? item.source_urls.slice(0, 2) : [item.source_url];
+    const sourceUrls = [...new Set(observations.filter(Boolean).flatMap(references).filter((url) => safeSource(url)))];
     let content = typeof text === "string" ? text : "No answer available.";
     const citation = (sourceUrls.length === 1 ? "Source: " : "Sources: ") + sourceUrls.join(" | ");
     if (sourceUrls.length && content.endsWith(citation)) content = content.slice(0, -citation.length).trim();
@@ -60,9 +62,9 @@
     article.append(label, body);
     for (const observation of observations) {
       if (!observation || typeof observation !== "object") continue;
-      const source = safeSource(observation.source_url);
+      const sources = references(observation).map(safeSource).filter(Boolean);
       const asOf = observation.as_of;
-      if (!source && !(typeof asOf === "string" && /^\d{4}-\d{2}-\d{2}$/.test(asOf))) continue;
+      if (!sources.length && !(typeof asOf === "string" && /^\d{4}-\d{2}-\d{2}$/.test(asOf))) continue;
       const meta = document.createElement("div");
       meta.className = "message-meta";
       if (typeof asOf === "string" && /^\d{4}-\d{2}-\d{2}$/.test(asOf)) {
@@ -70,10 +72,11 @@
         date.textContent = `As of ${asOf}`;
         meta.append(date);
       }
-      if (source) {
+      for (const source of sources) {
         const link = document.createElement("a");
         link.href = source;
-        link.textContent = observations.length === 1 ? "Treasury source ↗" : `Treasury source · ${asOf} ↗`;
+        const label = source.includes("newyorkfed.org") ? "New York Fed source" : source.includes("treasury.gov") ? "Treasury source" : source.includes("investor.gov") ? "SEC source" : "Federal Reserve source";
+        link.textContent = observations.length === 1 ? `${label} ↗` : `${label} · ${asOf} ↗`;
         link.target = "_blank";
         link.rel = "noopener noreferrer";
         meta.append(link);

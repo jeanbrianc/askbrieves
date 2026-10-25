@@ -1,4 +1,5 @@
 import base64
+from html.parser import HTMLParser
 from unittest.mock import Mock
 
 import pytest
@@ -32,3 +33,18 @@ def test_brand_image_is_a_valid_binary_png():
     assert result["headers"]["content-type"] == "image/png"
     assert result["isBase64Encoded"] is True
     assert base64.b64decode(result["body"], validate=True).startswith(b"\x89PNG\r\n\x1a\n")
+
+
+def test_github_footer_opens_without_opener_access():
+    links = []
+
+    class Links(HTMLParser):
+        def handle_starttag(self, tag, attrs):
+            if tag == "a":
+                links.append(dict(attrs))
+
+    result = handler.lambda_handler({"requestContext": {"http": {"method": "GET"}}, "rawPath": "/"}, None)
+    Links().feed(result["body"])
+    link = next(a for a in links if a.get("href") == "https://github.com/jeanbrianc/askbrieves")
+    assert link["target"] == "_blank"
+    assert {"noopener", "noreferrer"} <= set(link["rel"].split())

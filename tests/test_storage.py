@@ -64,3 +64,43 @@ def test_history_query_uses_retention_key_range_and_never_scans(table, monkeypat
     assert " >= " in built.condition_expression
     assert "2026-09-25T16:30:00+00:00" in built.attribute_value_placeholders.values()
     table.scan.assert_not_called()
+
+
+@pytest.mark.parametrize("provided,expected", [("o" * 40, "owner"), ("reviewer-demo", "reviewer"), ("wrong-access", None)])
+def test_owner_and_reviewer_credentials_have_distinct_identity(monkeypatch, provided, expected):
+    document = {"token": "o" * 40, "reviewer_token": "reviewer-demo", "reviewer_expires_at": int(NOW.timestamp()) + 60}
+    monkeypatch.setenv("API_SECRET_ARN", "access-secret")
+    monkeypatch.setattr(storage, "_secret_document", lambda arn: document)
+    assert storage.authenticate_token(provided, NOW) == expected
+
+
+@pytest.mark.parametrize("expires", [None, True, "2099", int(NOW.timestamp()), int(NOW.timestamp()) - 1])
+def test_expired_or_invalid_reviewer_expiry_cannot_authenticate(monkeypatch, expires):
+    monkeypatch.setenv("API_SECRET_ARN", "access-secret")
+    monkeypatch.setattr(storage, "_secret_document", lambda arn: {"token": "o" * 40, "reviewer_token": "reviewer-demo", "reviewer_expires_at": expires})
+    assert storage.authenticate_token("reviewer-demo", NOW) is None
+    assert storage.authenticate_token("o" * 40, NOW) == "owner"
+
+
+def test_legacy_owner_secret_stays_usable_without_reviewer_fields(monkeypatch):
+    monkeypatch.setenv("API_SECRET_ARN", "access-secret")
+    monkeypatch.setattr(storage, "_secret_document", lambda arn: {"token": "o" * 40})
+    assert storage.authenticate_token("o" * 40, NOW) == "owner"
+    assert storage.authenticate_token("reviewer-demo", NOW) is None
+
+
+def test_reviewer_history_uses_separate_partition_for_writes_and_reads(table):
+    owner = storage.start_history("owner-1", "Owner question", NOW)
+    reviewer = storage.start_history("reviewer-1", "Reviewer question", NOW, principal="reviewer")
+    assert owner["pk"] == "history" and reviewer["pk"] == "history#reviewer"
+    table.query.return_value = {"Items": []}
+    storage.recent_history(NOW, principal="reviewer")
+    built = ConditionExpressionBuilder().build_expression(table.query.call_args.kwargs["KeyConditionExpression"], is_key_condition=True)
+    assert "history#reviewer" in built.attribute_value_placeholders.values()
+    assert "history" not in built.attribute_value_placeholders.values()
+
+
+def test_history_audience_is_an_enum_not_client_input(table):
+    with pytest.raises(ValueError, match="Unknown history audience"):
+        storage.recent_history(NOW, principal="history")
+    table.query.assert_not_called()

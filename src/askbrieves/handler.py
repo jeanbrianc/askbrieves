@@ -2,7 +2,6 @@
 
 import base64
 import binascii
-import hmac
 import json
 import os
 from pathlib import Path
@@ -13,6 +12,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 from askbrieves import storage
+from askbrieves.knowledge import curve_answer, explain_concept
 from askbrieves.planner import POLICY_VERSION, PlannerUnavailable, plan_question
 from askbrieves.rates import RatesNotPublished, RatesUnavailable, fetch_yields
 
@@ -91,13 +91,18 @@ def answer_from_evidence(evidence, maturities):
     return " ".join(paragraphs) + " These are daily U.S. Treasury par yields, not live quotes or deposit APYs. " + citation
 
 
-def process_question(question, request_id, now):
+def process_question(question, request_id, now, principal="owner"):
     storage.claim_daily_request(now)
-    item = storage.start_history(request_id, question, now)
+    item = storage.start_history(request_id, question, now, principal=principal)
     try:
         plan = plan_question(question, storage.secret(os.environ["OPENAI_SECRET_ARN"], "api_key"))
         if plan["action"] == "decline":
             result = {"status": "declined", "answer": DECLINED, "reason": plan["reason"]}
+        elif plan["action"] == "explain":
+            result = {"status": "answered", **explain_concept(plan["topic"])}
+        elif plan["action"] == "curve":
+            evidence = fetch_yields(["2y", "10y"], dates=plan["dates"])
+            result = {"status": "answered", "answer": curve_answer(evidence), "evidence": evidence}
         else:
             evidence = fetch_yields(plan["maturities"], dates=plan["dates"])
             result = {"status": "answered", "answer": answer_from_evidence(evidence, plan["maturities"]),
@@ -144,15 +149,15 @@ def lambda_handler(event, context):
         if not provided.startswith("Bearer ") or len(provided) > 1024:
             status, outcome = 401, "unauthorized"
             return response(status, {"error": "Valid bearer token required"}, request_id)
-        expected = storage.secret(os.environ["API_SECRET_ARN"], "token")
-        if not hmac.compare_digest(provided[7:].encode(), expected.encode()):
+        principal = storage.authenticate_token(provided[7:])
+        if principal is None:
             status, outcome = 401, "unauthorized"
             return response(status, {"error": "Valid bearer token required"}, request_id)
         if method == "GET":
             status, outcome = 200, "history"
-            return response(status, {"items": storage.recent_history(), "limit": 20}, request_id)
+            return response(status, {"items": storage.recent_history(principal=principal), "limit": 20}, request_id)
         question = read_question(event)
-        status, body = process_question(question, request_id, datetime.now(timezone.utc))
+        status, body = process_question(question, request_id, datetime.now(timezone.utc), principal=principal)
         outcome = body["status"]
         return response(status, body, request_id)
     except InvalidQuestion:

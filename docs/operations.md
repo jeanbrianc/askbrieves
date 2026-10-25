@@ -2,9 +2,9 @@
 
 ## Ownership and signals
 
-The demo has one owner and one shared bearer credential. `GET /health` is **liveness only**: it confirms code is responding, not that OpenAI, Treasury, or history is available. `scripts/smoke.py` exercises latest and historical lookups, date comparisons, no-data handling, refusals, and persisted history. Each authenticated question consumes a daily attempt, including refusals and no-data results.
+The demo has an owner credential and an optional expiring reviewer credential. Histories use separate fixed partitions; a reviewer cannot request the owner's partition. People sharing the reviewer credential share that audience's history. `GET /health` is liveness only, not a dependency check. Every accepted question, including explanations and refusals, consumes one global daily attempt.
 
-The public `/` page is a small chat interface; `/app.js`, `/styles.css`, and the supplied `/brand.png` are public assets served through the same Lambda. Access opens a compact token dialog. Enter the demo bearer token, never the OpenAI API key. The token stays in memory, without browser storage or cookies. Questions and the shared read-only history still require API authentication. The Content Security Policy permits only same-origin assets and connections. The CLI remains available.
+The public `/` page and assets are served by the same Lambda. Access accepts a demo bearer token, never the OpenAI key. Tokens remain in memory, without browser storage or cookies. Questions and audience-scoped history require authentication. The CSP permits same-origin assets and connections; educational source links use official Treasury, Federal Reserve, New York Fed, and SEC hosts. The quiet footer links to GitHub. No question-supplied URLs are fetched.
 
 CloudFormation outputs `FunctionName`, `FunctionLogGroup`, `ApiLogGroup`, and `HistoryTable`. Application logs emit request ID, status, outcome, and duration; the same request ID is returned in the response/header. Access logs contain gateway request ID, route, status, and latency. Use these IDs for correlation without printing questions or credentials. Three alarms cover API 5xx, unhandled Lambda errors, and Lambda throttles. **No alarm notification/paging destination is configured**; alarms must be inspected in CloudWatch until an owner adds one. Handled dependency failures appear in API 5xx, even when Lambda's invocation succeeded.
 
@@ -55,7 +55,9 @@ aws lambda delete-function-concurrency --function-name askbrieves-api --region u
 
 If the recorded configuration had a positive reservation, restore that exact value with `put-function-concurrency --reserved-concurrent-executions VALUE` instead. These are emergency drift operations. Record the incident/change, restore the declared setting, and reconcile with IaC. Revoking the OpenAI key is an additional provider-side cutoff; it does not stop unauthenticated AWS request charges.
 
-Rotate the shared API token by creating a new secret version with a fresh random `token` field in Secrets Manager, distribute privately, and allow up to60 seconds for caches. Rotate the OpenAI project key by updating `api_key` in its secret and revoke the old key after testing. Do not send values through GitHub or chat. The Lambda role can read only the two referenced secrets. Secrets using a customer-managed KMS key require an explicitly scoped `kms:Decrypt` grant; the provided template assumes the AWS-managed Secrets Manager key.
+Rotate owner access by updating the secret's `token` field with a fresh high-entropy value, preserving reviewer fields. Optional `reviewer_token` (12–512 characters) requires `reviewer_expires_at` (integer UTC epoch). Give it a short lifetime and revoke it by expiring or removing those fields. Missing reviewer fields do not disable owner access. Allow up to 60 seconds for caches. The temporary reviewer credential is a demo convenience, not a production password policy.
+
+Rotate the OpenAI project key in its separate `api_key` secret and revoke the old key after testing. Never commit credentials or post them in public issues. Runtime IAM still reads only the two existing secrets. A customer-managed KMS key needs scoped `kms:Decrypt`; the template assumes the AWS-managed Secrets Manager key.
 
 ## Releases and rollback
 
