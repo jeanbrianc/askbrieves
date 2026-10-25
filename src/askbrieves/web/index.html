@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="description" content="Ask plain-language questions about the latest published U.S. Treasury yields.">
+  <title>AskBrieves · Treasury yields, clearly</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <header class="site-header">
+      <a class="brand" href="/" aria-label="AskBrieves home"><span class="brand-icon" aria-hidden="true">b.</span><span><span class="brand-prefix">ask</span>brieves</span></a>
+      <div class="header-actions"><span class="connection-state" id="connection-state"><span class="status-dot" aria-hidden="true"></span><span id="connection-label">Access required</span></span><button class="text-button" id="disconnect-button" type="button" hidden>Disconnect</button></div>
+    </header>
+
+    <main>
+      <section class="intro" aria-labelledby="page-title">
+        <div class="eyebrow"><span class="eyebrow-line" aria-hidden="true"></span>THE RATE BRIEF</div>
+        <h1 id="page-title">Treasury yields.<br><span>In plain English.</span></h1>
+        <p class="intro-description">Ask a question. Get a clear answer grounded in the latest published U.S. Treasury data.</p>
+      </section>
+
+      <div class="workspace">
+        <section class="chat-card" aria-label="Ask Brieves">
+          <div class="chat-toolbar"><div class="assistant-identity"><span class="assistant-mark" aria-hidden="true">b.</span><div><strong>Brieves</strong><span>Your Treasury rate assistant</span></div></div><button class="text-button" id="clear-button" type="button">Clear chat</button></div>
+
+          <section class="access-panel" id="access-panel" aria-labelledby="access-title">
+            <div class="access-heading"><span class="lock-symbol" aria-hidden="true">↗</span><div><h2 id="access-title">A small key. A clear answer.</h2><p>Enter your access token to start a conversation.</p></div></div>
+            <form id="access-form" class="access-form">
+              <div class="token-field"><label for="access-token">Access token</label><input id="access-token" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="512" required placeholder="Your private access token" aria-describedby="token-help"></div>
+              <button class="connect-button" type="submit">Connect <span aria-hidden="true">→</span></button>
+            </form>
+            <p class="help-text" id="token-help">Your token stays in this tab. It is never saved in your browser.</p>
+          </section>
+
+          <div class="conversation" id="conversation" role="log" aria-label="Conversation" aria-live="polite" aria-relevant="additions text" tabindex="0">
+            <article class="message assistant-message welcome-message" id="welcome-message"><div class="message-label">BRIEVES</div><p>Hi, I’m Brieves. Ask me for a Treasury yield, or compare two maturities. I’ll give you the latest published figure, its date, and the source.</p><div class="welcome-note"><span aria-hidden="true">✓</span> A focused answer, backed by public data.</div></article>
+          </div>
+
+          <div class="examples" id="examples" aria-label="Example questions"><span class="examples-label">TRY ASKING</span><button class="example-button" type="button" data-question="What's the 10-year Treasury yield?">10-year yield <span aria-hidden="true">↗</span></button><button class="example-button" type="button" data-question="Compare the 2-year and 10-year Treasury yields.">2-year vs. 10-year <span aria-hidden="true">↗</span></button><button class="example-button" type="button" data-question="What's the 3-month Treasury yield?">3-month yield <span aria-hidden="true">↗</span></button></div>
+
+          <div class="composer-area">
+            <div class="notice" id="notice" role="status" aria-live="polite"></div>
+            <form id="question-form" class="composer"><label class="sr-only" for="question">Your Treasury yield question</label><textarea id="question" rows="2" maxlength="500" placeholder="What would you like to know about Treasury yields?" aria-describedby="composer-help character-count" required></textarea><div class="composer-bottom"><span id="character-count" class="character-count">0 / 500</span><button class="send-button" id="send-button" type="submit" disabled><span id="send-label">Ask Brieves</span><span aria-hidden="true">↑</span></button></div></form>
+            <p class="composer-help" id="composer-help">Enter to send · Shift + Enter for a new line. Please don’t include personal information.</p>
+          </div>
+        </section>
+
+        <aside class="context-sidebar" aria-label="About this brief">
+          <div class="context-card"><div class="small-label">THE DETAILS MATTER</div><h2>A little context<br>for your answer.</h2><div class="context-item"><span class="context-number">01</span><div><h3>Official source</h3><p>U.S. Treasury daily par yields, with a date and source for every answer.</p></div></div><div class="context-item"><span class="context-number">02</span><div><h3>Deliberately focused</h3><p>Latest yields for one or two maturities, from 1 month to 30 years.</p></div></div><div class="context-item"><span class="context-number">03</span><div><h3>Facts over forecasts</h3><p>Daily observations, rather than live quotes, personal advice, or predictions.</p></div></div><div class="context-footnote">Published on business days.<br>Weekends use the latest available observation.</div></div>
+          <div class="history-card"><h2>Pick up the thread.</h2><p>View recent questions and answers from this shared demo.</p><button class="history-button" id="history-button" type="button" disabled>Recent history <span aria-hidden="true">→</span></button></div>
+        </aside>
+      </div>
+    </main>
+
+    <footer class="site-footer"><span>Made for clearer questions.</span><span>Public data. Focused answers.</span></footer>
+  </div>
+</body>
+</html>

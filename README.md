@@ -2,11 +2,13 @@
 
 A small agentic service that answers questions about **latest published U.S. Treasury par yields**. Built for the ModernFi platform engineering take-home, with the emphasis on bounded behavior, repeatable deployment, and clear operational tradeoffs.
 
-Endpoint: **https://askbrieves.brianjeanbuilds.com**. `GET /health` is public; questions and history require the demo bearer token. Deployment evidence is recorded in [docs/verification.md](docs/verification.md).
+Open the chat at **https://askbrieves.brianjeanbuilds.com**. The page, its assets, and `GET /health` are public; questions and history require the demo bearer token. Deployment evidence is recorded in [docs/verification.md](docs/verification.md).
 
 ## Try it
 
-Python 3.13+ is sufficient for the client; no packages are required. Ask Brian for the demo token through a private channel. The client prompts without echoing it, so it does not enter shell history.
+Visit the site and enter the **demo bearer token**, obtained from Brian through a private channel. This is not an OpenAI API key. The chat keeps it in page memory only, without writing it to browser storage or cookies. Ask a supported Treasury yield question or view recent history; all token holders share the same read-only history view.
+
+The command-line client is also available. Python 3.13+ is sufficient; no packages are required. It prompts for the token without echoing it, so it does not enter shell history.
 
 ```bash
 python3 scripts/client.py "What's the 10-year Treasury yield?"
@@ -27,7 +29,7 @@ Supported maturities: 1, 2, 3, 4, 6 months; 1, 2, 3, 5, 7, 10, 20, 30 years. A q
 
 ```mermaid
 flowchart LR
-    C[CLI / HTTPS] --> G[API Gateway + TLS]
+    C[Browser chat / CLI] --> G[API Gateway + TLS]
     G --> L[Python Lambda]
     L --> S[Secrets Manager]
     L --> D[DynamoDB quota + history]
@@ -44,6 +46,8 @@ This is a constrained, single-step tool-using agent. An open-ended loop, vector 
 
 **Python + Lambda + HTTP API:** few moving parts, no server patching or idle container fleet, and native request throttling and TLS. The runtime uses the standard library and Lambda's provided boto3; no compiled packages or Docker are needed on an M1 Mac. We accept AWS's runtime SDK updates for this small service; package and pin boto3 if stronger dependency reproducibility becomes necessary.
 
+**Small chat interface:** plain HTML, JavaScript, and CSS are served by the same Lambda, with no frontend build step, external assets, or analytics. A Content Security Policy restricts scripts, styles, and connections to the same origin. The UI uses the same authenticated API and scope controls as the CLI.
+
 **DynamoDB:** the access patterns are append/update a request, list recent history, and increment an atomic daily counter. There are no joins or business transactions requiring PostgreSQL. On-demand billing avoids capacity tuning for an interview demo. The table is encrypted, has point-in-time recovery, and is retained when the stack is deleted.
 
 **Plain CloudFormation:** explicit, reviewable AWS resources without another IaC state service or framework dependency. Pulumi would be reasonable in an existing Pulumi estate; this isolated service does not need a new toolchain. A separate bootstrap stack owns private artifact storage, and immutable SHA-256 package keys make rollback straightforward. Deployment is a human-invoked action; CI validates but has no AWS credentials or deployment permission.
@@ -57,7 +61,7 @@ This is a constrained, single-step tool-using agent. An open-ended loop, vector 
 | Access | Generated 48-character bearer secret, constant-time comparison, HTTPS only. One shared demo audience; holders can read all demo history. No tenant isolation claim. |
 | Agent authority | One model call; two schema-constrained actions; no generic tools; local validation; fixed numeric/prose output path. Scope classification is probabilistic, not a formal guarantee. |
 | Data integrity | Fixed Treasury host/path, redirects disabled, XML DTD/entities rejected, 1 MiB source cap, dated/freshness-checked observations, decimal arithmetic. No invented fallback rates. |
-| Cost containment | API target 1 request/second, burst 2; default Lambda reservation 2; global atomic 100 attempts per UTC day; 256 output tokens per call; no automatic provider retry. An explicit optional setting can omit the reservation and share account capacity instead. Refusals and failed attempts consume quota. Gateway throttling is best effort; this is not a hard dollar cap. |
+| Cost containment | API target 1 request/second, burst 2; global atomic 100 attempts per UTC day; 256 output tokens per call; no automatic provider retry. Lambda shares existing account concurrency capacity by default. Refusals and failed attempts consume quota. Gateway throttling is best effort; this is not a hard dollar cap. |
 | Secrets / IAM | Secret ARNs in config, values fetched only by runtime, 60-second cache. Function permissions name its two secrets, its one table, and its log group. No trading, account access, or general AWS authority. |
 | History / privacy | Accepted questions, decisions, and answers retained for 30 days; query hides expired history even before asynchronous TTL deletion. No prompts, answers, tokens, IPs, or provider bodies in application/access logs; log retention 14 days. Do not submit PII or credentials. Obvious API/AWS key patterns are rejected, not comprehensive PII detection. |
 | Fail closed | Auth, model, source, quota-store, or history-store errors cannot produce a successful rate answer. A crash/timeout can leave a pending history entry; retries are new attempts, with no exactly-once promise. |
@@ -83,7 +87,7 @@ AWS_PROFILE=your-profile bash scripts/deploy.sh us-east-1 \
 
 The script tests/lints, packages, deploys `askbrieves-artifacts`, uploads an immutable artifact, then deploys `askbrieves` with `CAPABILITY_IAM`. Review the templates and CloudFormation change set when adapting this to another account. ACM creates its DNS validation record in the supplied zone. The custom domain has TLS 1.2 minimum and IPv4/IPv6 aliases; the default execute-api endpoint is disabled. For a disposable alternate stack, set `ASKBRIEVES_STACK=askbrieves-test` and use another domain.
 
-The template defaults to `ReservedConcurrency=2`. The regional account quota must leave AWS's required unreserved pool available in addition to that reservation. An account limited to 10 total executions needs a quota of at least 12 to reserve two for this service. The preferred deployment retains the small function reservation. For a deliberate fallback on a low-quota account, prefix the deployment command with `ASKBRIEVES_RESERVED_CONCURRENCY=-1` to omit it. That shares existing account capacity without raising the account quota or guaranteeing capacity to this service. The 1 request/second target, burst of 2, and atomic 100-attempt daily cap still apply. Inspect the account and function quotas when adapting this deployment; the script never silently changes reservation policy.
+The default `ReservedConcurrency=-1` omits a Lambda reservation and shares existing account capacity. The script does not request a quota increase. An optional positive `ASKBRIEVES_RESERVED_CONCURRENCY` setting reserves and limits function capacity when the regional account has enough available; the API throttle and daily request cap apply in either mode.
 
 Get the generated demo token privately from the stack's `ApiAccessSecretArn` output in the Secrets Manager console. Do not put the token in tickets, screenshots, commands, or deployment files. The client accepts a hidden prompt; CI tests mock dependencies. For a live acceptance test, inject `ASKBRIEVES_TOKEN` into the process securely and run `python scripts/smoke.py`. See [operations](docs/operations.md) for rotation, incident handling, rollback, and teardown.
 

@@ -11,8 +11,10 @@ def main():
     build.mkdir(exist_ok=True)
     path = build / "askbrieves.zip"
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
-        for source in sorted((root / "src" / "askbrieves").glob("*.py")):
-            entry = zipfile.ZipInfo("askbrieves/" + source.name, date_time=(2026, 1, 1, 0, 0, 0))
+        sources = list((root / "src" / "askbrieves").glob("*.py"))
+        sources += [p for p in (root / "src" / "askbrieves" / "web").glob("*") if p.suffix in (".html", ".js", ".css")]
+        for source in sorted(sources):
+            entry = zipfile.ZipInfo(str(source.relative_to(root / "src")), date_time=(2026, 1, 1, 0, 0, 0))
             entry.compress_type = zipfile.ZIP_DEFLATED
             entry.external_attr = 0o644 << 16
             archive.writestr(entry, source.read_bytes())

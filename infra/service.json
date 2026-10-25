@@ -33,7 +33,7 @@
     },
     "ReservedConcurrency": {
       "Type": "Number",
-      "Default": 2,
+      "Default": -1,
       "AllowedValues": [-1, 1, 2, 3, 4, 5, 10],
       "Description": "Function concurrency reservation; -1 omits the reservation and uses the existing shared account quota."
     },
@@ -232,6 +232,24 @@
         "Target": {"Fn::Sub": "integrations/${Integration}"}
       }
     },
+    "ScriptRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Properties": {
+        "ApiId": {"Ref": "Api"},
+        "RouteKey": "GET /app.js",
+        "AuthorizationType": "NONE",
+        "Target": {"Fn::Sub": "integrations/${Integration}"}
+      }
+    },
+    "StylesRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Properties": {
+        "ApiId": {"Ref": "Api"},
+        "RouteKey": "GET /styles.css",
+        "AuthorizationType": "NONE",
+        "Target": {"Fn::Sub": "integrations/${Integration}"}
+      }
+    },
     "HealthRoute": {
       "Type": "AWS::ApiGatewayV2::Route",
       "Properties": {
@@ -261,7 +279,7 @@
     },
     "Stage": {
       "Type": "AWS::ApiGatewayV2::Stage",
-      "DependsOn": ["RootRoute", "HealthRoute", "QuestionsRoute", "HistoryRoute"],
+      "DependsOn": ["RootRoute", "ScriptRoute", "StylesRoute", "HealthRoute", "QuestionsRoute", "HistoryRoute"],
       "Properties": {
         "ApiId": {"Ref": "Api"},
         "StageName": "$default",

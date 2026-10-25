@@ -7,7 +7,7 @@ task_secret="${2:?same-region OpenAI secret ARN required}"
 task_zone="${3:?public Route 53 hosted zone ID required}"
 task_domain="${4:-askbrieves.brianjeanbuilds.com}"
 task_stack="${ASKBRIEVES_STACK:-askbrieves}"
-task_concurrency="${ASKBRIEVES_RESERVED_CONCURRENCY:-2}"
+task_concurrency="${ASKBRIEVES_RESERVED_CONCURRENCY:--1}"
 cd "$(dirname "$0")/.."
 python3 -m pytest -q
 cfn-lint infra/bootstrap.json infra/service.json
