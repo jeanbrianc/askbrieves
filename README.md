@@ -2,7 +2,7 @@
 
 A small agentic service that answers questions about **latest and dated U.S. Treasury par yields**. Built for the ModernFi platform engineering take-home, with the emphasis on bounded behavior, repeatable deployment, and clear operational tradeoffs.
 
-Open the chat at **https://askbrieves.brianjeanbuilds.com**. The page, its assets, and `GET /health` are public; questions and history require the demo bearer token. Deployment evidence is recorded in [docs/verification.md](docs/verification.md).
+Open the chat at **https://askbrieves.brianjeanbuilds.com**. The page, its assets, and `GET /health` are public; questions and history require the demo bearer token. See the [historical release proof](docs/verification-historical.md) and [initial deployment evidence](docs/verification.md).
 
 ## Try it
 
@@ -48,6 +48,8 @@ flowchart LR
 4. Format the answer and any basis-point spread in Python, then persist the result **before** returning it. The model supplies neither numeric rates nor arbitrary final prose.
 
 This is a constrained, single-step tool-using agent. An open-ended loop, vector database, multi-agent framework, and a second LLM answer-writing call add little value here. The final answer is grounded by construction, even if the probabilistic scope gate makes a mistake. The model cannot read history, retrieve AWS resources, browse a submitted URL, or execute code.
+
+Each question is sent to the OpenAI Responses API using the server-side project key. Previous chat messages are not sent; each question must specify its own maturity and dates.
 
 **Python + Lambda + HTTP API:** few moving parts, no server patching or idle container fleet, and native request throttling and TLS. The runtime uses the standard library and Lambda's provided boto3; no compiled packages or Docker are needed on an M1 Mac. We accept AWS's runtime SDK updates for this small service; package and pin boto3 if stronger dependency reproducibility becomes necessary.
 
