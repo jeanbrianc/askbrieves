@@ -24,12 +24,18 @@
       "AllowedPattern": "[a-zA-Z0-9_.:-]{1,100}",
       "Description": "Pinned Responses API model supporting strict function calling and reasoning effort none."
     },
-    "DailyRequestLimit": {
+    "RequestLimit": {
       "Type": "Number",
-      "Default": 100,
+      "Default": 1000,
       "MinValue": 1,
       "MaxValue": 1000,
-      "Description": "Global UTC daily limit on authenticated model attempts, including declined questions."
+      "Description": "Integer total allowance for the seven-day review window, including declined and failed model attempts; no daily reset."
+    },
+    "ReviewWindowEndsAt": {
+      "Type": "Number",
+      "MinValue": 1,
+      "MaxValue": 4102444800,
+      "Description": "Integer UTC epoch end of the fixed seven-day review window. Preserve on code updates; explicitly changing it opens a new allowance."
     },
     "ReservedConcurrency": {
       "Type": "Number",
@@ -195,7 +201,8 @@
             "OPENAI_SECRET_ARN": {"Ref": "OpenAISecretArn"},
             "API_SECRET_ARN": {"Ref": "ApiAccessSecret"},
             "OPENAI_MODEL": {"Ref": "OpenAIModel"},
-            "DAILY_REQUEST_LIMIT": {"Ref": "DailyRequestLimit"},
+            "REQUEST_LIMIT": {"Ref": "RequestLimit"},
+            "REVIEW_WINDOW_ENDS_AT": {"Ref": "ReviewWindowEndsAt"},
             "HISTORY_DAYS": {"Ref": "HistoryDays"},
             "MAX_DATA_AGE_DAYS": {"Ref": "MaxDataAgeDays"}
           }
