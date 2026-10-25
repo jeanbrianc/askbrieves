@@ -2,25 +2,45 @@
 
 A small agentic service that answers questions about **latest and dated U.S. Treasury par yields**, with bounded behavior, repeatable deployment, and clear operational tradeoffs.
 
-Open the chat at **https://askbrieves.brianjeanbuilds.com**. The page, its assets, and `GET /health` are public; questions and history require the demo bearer token. See the [reviewer access verification](docs/verification-reviewer.md), [historical release proof](docs/verification-historical.md), and [initial deployment evidence](docs/verification.md).
+The design puts a flexible language interface around a small set of verifiable operations. OpenAI interprets the question; application code decides which operations are allowed, retrieves the evidence, calculates the result, and saves the answer. The [design choices](#design-choices-and-tradeoffs) explain why those boundaries matter.
 
-## Try it
+## Run the service
 
-Visit the site, write a question, and use **Access** to enter the demo bearer token obtained privately from Brian. This is not an OpenAI API key. The single-screen chat uses Brian's supplied mascot/logo, two example prompts, and a bottom composer. The token stays in page memory only, without browser storage or cookies. Owner and reviewer history are separate; people sharing the reviewer credential share only that audience's history.
+### Use the hosted chat
 
-The command-line client is also available. Python 3.13+ is sufficient; no packages are required. It prompts for the token without echoing it, so it does not enter shell history.
+1. Open **https://askbrieves.brianjeanbuilds.com**.
+2. Select **Access** and enter the reviewer bearer token supplied privately by Brian. Ask for a fresh token if access has expired. No AWS account or OpenAI key is needed to use this deployment.
+3. Ask a question such as “What was the 10-year Treasury yield on October 23, 2025?” or “Is the yield curve inverted?” Use **History** to retrieve saved questions and answers.
+
+The bearer token authorizes this service; it is not the server's OpenAI API key. It stays in tab memory, without browser storage or cookies, so reconnect after refreshing. Questions are independent: include the maturity and date in each question rather than relying on earlier messages. Reviewer history is separate from owner history; people sharing the reviewer token share that audience's history. New questions create new history entries.
+
+The page, assets, and `GET /health` are public. Health reports that the handler is running; it does not check OpenAI, Treasury, secrets, or the database.
+
+### Use the command-line client
+
+Install Python 3.13+ and Git, then clone the repository. The client uses only the standard library; it needs no package installation or AWS credentials.
 
 ```bash
+git clone https://github.com/jeanbrianc/askbrieves.git
+cd askbrieves
 python3 scripts/client.py "What's the 10-year Treasury yield?"
+```
+
+Enter the bearer token at the hidden prompt. The client contacts the hosted HTTPS service and prints the plain-language answer. More examples:
+
+```bash
 python3 scripts/client.py "Compare the 2-year and 10-year Treasury yields"
 python3 scripts/client.py "What was the 10 year rate on October 23rd, 2025?"
-python3 scripts/client.py "Compare the 2-year and 10-year Treasury yields on October 23rd, 2025"
 python3 scripts/client.py "Compare the 10-year Treasury yield on 2025-10-23 with the latest yield"
 python3 scripts/client.py "What is a basis point?"
 python3 scripts/client.py "Is the yield curve inverted?"
 python3 scripts/client.py --history
 curl --fail https://askbrieves.brianjeanbuilds.com/health
 ```
+
+For your own deployment, pass its endpoint explicitly: `python3 scripts/client.py --url https://askbrieves.your-domain.com "What is the 10-year Treasury yield?"`. Without `--url`, the client uses Brian's hosted service.
+
+## Supported behavior and API
 
 The API accepts `POST /questions`, JSON `{"question":"What's the 10-year Treasury yield?"}`, and `Authorization: Bearer <token>`. It returns JSON containing a plain-language `answer`, `status`, `request_id`, and source evidence for answered questions. `GET /history` returns the newest 20 records. Authentication failures are 401; malformed inputs 400; exhausted daily quota 429; unavailable dependencies or invalid data 503. A deliberate scope refusal is 200 with `status: declined`. A supported date with no published observation or requested maturity is 200 with `status: no_data`; the service explains the gap without substituting another date or tenor.
 
@@ -32,7 +52,7 @@ Supported maturities: 1, 2, 3, 4, 6 months; 1, 2, 3, 5, 7, 10, 20, 30 years. A q
 
 Single-date evidence contains `as_of`, `rates`, a readable Treasury monthly `source_url`, and the raw XML `data_url`. Two-date evidence contains an `observations` list with that same evidence structure for each date. Dates and numeric values are formatted by the application from the verified source data.
 
-## How it works and why
+## Request flow
 
 ```mermaid
 flowchart LR
@@ -51,19 +71,61 @@ flowchart LR
 
 The service also explains basis points, Treasury yields, yield curves, inversion, spreads, yield versus APY, and federal-funds versus Treasury rates. These are fixed, reviewed explanations with official references, not model-written advice. Curve assessments calculate the 2-year/10-year segment from verified observations; they do not forecast recessions or describe every point on the curve. Current Fed policy-rate quotes remain outside the data scope.
 
-This is a constrained, single-step tool-using agent. An open-ended loop, vector database, multi-agent framework, and a second LLM answer-writing call add little value here. The final answer is grounded by construction, even if the probabilistic scope gate makes a mistake. The model cannot read history, retrieve AWS resources, browse a submitted URL, or execute code.
+## Design choices and tradeoffs
 
-Each question is sent to the OpenAI Responses API using the server-side project key. Previous chat messages are not sent; each question must specify its own maturity and dates.
+### Use a model for language understanding, keep authority in code
 
-**Python + Lambda + HTTP API:** few moving parts, no server patching or idle container fleet, and native request throttling and TLS. The runtime uses the standard library and Lambda's provided boto3; no compiled packages or Docker are needed on an M1 Mac. We accept AWS's runtime SDK updates for this small service; package and pin boto3 if stronger dependency reproducibility becomes necessary.
+People ask for the same observation in different ways: “10-year rate,” “Treasury yield,” or a comparison with a named historical date. One OpenAI Responses call translates that language into a small, structured decision. This gives the interface useful flexibility while keeping the execution path inspectable. Strict tool schemas are backed by independent Python validation; the model cannot read history, access AWS resources, fetch a submitted URL, or execute code.
 
-**Small chat interface:** plain HTML, JavaScript, and CSS are served by the same Lambda, with no frontend build step, external assets, or analytics. A Content Security Policy restricts scripts, styles, and connections to the same origin. The UI uses the same authenticated API and scope controls as the CLI.
+Quoted yields and calculated spreads come from validated source observations and decimal arithmetic. Educational answers come from seven reviewed definitions with official citations. A second model call to write the answer would add latency, cost, and another opportunity to invent information without improving these narrow responses. An agent loop or vector database would add state and operations that this task does not need.
 
-**DynamoDB:** the access patterns are append/update a request, list recent history, and increment an atomic daily counter. There are no joins or business transactions requiring PostgreSQL. On-demand billing avoids capacity tuning for a small service. The table is encrypted, has point-in-time recovery, and is retained when the stack is deleted.
+The accepted limitation is semantic accuracy: the model can still select the wrong allowed maturity, date, or topic. Source grounding prevents invented rates; it does not prove that the question was understood correctly. Each successful rate lookup exposes its observation date and evidence so that interpretation can be checked. A larger policy evaluation dataset would be the next investment before broadening the tools.
 
-**Plain CloudFormation:** explicit, reviewable AWS resources without another IaC state service or framework dependency. Pulumi would be reasonable in an existing Pulumi estate; this isolated service does not need a new toolchain. A separate bootstrap stack owns private artifact storage, and SHA-256-addressed package keys make rollback straightforward; bucket versioning does not make those keys write-once. Deployment is a human-invoked action; CI validates but has no AWS credentials or deployment permission.
+Each question is sent to OpenAI using the server-side project key. Earlier chat messages are not forwarded. Standalone questions keep input size and privacy exposure predictable, at the cost of conversational follow-ups such as “what about last year?” needing a complete question.
 
-**Treasury directly:** an authoritative public source with no extra data-provider key. These are nominal daily par constant-maturity yields, not intraday executable quotes, a bond price, or deposit APY. [Treasury feed documentation](https://home.treasury.gov/treasury-daily-interest-rate-xml-feed) and [methodology](https://home.treasury.gov/policy-issues/financing-the-government/interest-rate-statistics/interest-rates-frequently-asked-questions).
+### Prefer an authoritative, narrow data source over broad coverage
+
+Treasury publishes the exact daily nominal par-yield series used by the service, without a second provider credential or a data subscription. Fetching its structured XML avoids scraping a presentation page; the chat links to the readable monthly table, while API evidence also retains the raw feed URL. [Feed documentation](https://home.treasury.gov/treasury-daily-interest-rate-xml-feed), [methodology](https://home.treasury.gov/policy-issues/financing-the-government/interest-rate-statistics/interest-rates-frequently-asked-questions).
+
+Historical questions require an exact published row. Silently substituting Friday for a requested Saturday would produce a plausible answer to a different question. Latest observations instead have a seven-calendar-day freshness allowance to accommodate publication gaps, with stale or future observations rejected. Two maturities from one date use the same row, and comparisons preserve both dates.
+
+This deliberately limits coverage to daily Treasury par yields rather than live prices, bank APYs, mortgages, or Fed policy-rate values. The service depends on Treasury's availability and may return `no_data` or 503. Returning an explicit gap is preferable to substituting a different product, date, or unverified value. A cache could reduce repeated downloads, but would need equally explicit provenance, freshness, and invalidation rules.
+
+### Use Python and serverless infrastructure to keep operations small
+
+The workload is a short HTTP request followed by bounded API calls and a database write. Python's standard library covers the HTTP, JSON, XML, and decimal work. Lambda plus API Gateway supplies managed execution, routing, TLS, and throttling without an always-running container or server to patch. Pure-Python packaging works on an M1 Mac without Docker or cross-compilation.
+
+The tradeoffs are AWS dependence, cold starts, and a synchronous dependency chain. Lambda has a 28-second timeout; slow provider calls can exhaust it. Automatic provider retries are omitted so that latency and paid attempts remain bounded. A timeout can leave a pending record, and a client retry is a new attempt. There is no exactly-once guarantee.
+
+The function uses Lambda's provided boto3. That keeps the deployment small but accepts runtime SDK updates; the development requirements pin direct dependencies, not a complete transitive lock. Bundling a pinned runtime SDK and locking the dependency graph would be appropriate if stronger reproducibility became a requirement.
+
+### Match DynamoDB to the access patterns, make persistence part of success
+
+The service needs three operations: record/update a request, query recent audience history, and atomically increment a daily counter. DynamoDB supports those operations without a relational schema, connection pool, or capacity planning in on-demand mode. Conditional writes enforce the global daily allowance even when requests arrive concurrently.
+
+A pending history record is written before model work, and the completed answer must be persisted before a successful response is returned. That makes persistence a condition of a successful API response. The cost is availability: a history-store failure prevents a successful answer even if the provider returned usable data. Failed and declined attempts consume quota because they still use resources.
+
+History has a 30-day visibility window and TTL, encryption, point-in-time recovery, and retention on stack deletion. These choices favor recovery and traceability, while accepting storage costs and cleanup work. TTL deletion is asynchronous and backups can retain older data; this is not a statutory deletion guarantee. History retrieval returns the newest 20 records, without pagination or an analytics interface.
+
+### Separate demo access from provider credentials, limit runtime permissions
+
+A generated owner bearer credential and an optional expiring reviewer credential are sufficient for a small, privately shared demo. Fixed history partitions keep reviewer traffic separate from owner traffic without introducing an identity platform. The OpenAI key stays in a different Secrets Manager secret and never belongs in a browser or client command. Runtime IAM names only the two required secrets, one table, and the function log group. A 60-second secret cache reduces repeated reads while allowing rotation to take effect shortly afterward.
+
+This is audience isolation, not individual user or tenant isolation. Reviewers sharing a credential share their history and the global allowance. Production multi-client access would require per-client identity, authorization, revocation, and quotas. The API's daily attempt cap limits model use; it does not cap AWS charges from public traffic. Gateway throttling is best effort, and the function uses shared account concurrency by default rather than requiring a new capacity reservation.
+
+### Make infrastructure and releases explicit
+
+CloudFormation keeps the deployed resources and their configuration reviewable in two templates, with state managed by AWS. A separate bootstrap stack owns the private, encrypted, versioned artifact bucket; the service stack owns the API, function, history, generated API-access secret, DNS/TLS, and alarms. The OpenAI key secret is supplied externally. Keeping release artifacts outside the service stack makes code replacement and rollback easier to reason about.
+
+Packages use deterministic contents and SHA-256-addressed S3 keys. A previous artifact key provides a concrete rollback target; bucket versioning does not make a key write-once. CI runs tests, template lint, and packaging with no AWS credentials or deployment permission. A human invokes deployment, preserving an explicit infrastructure-change boundary at the cost of a manual release step.
+
+Retaining state across stack deletion avoids accidental loss of history and credentials, but means teardown is not complete until retained resources are reviewed. Three alarms expose API errors, Lambda errors, and throttles. They have no paging destination yet; that is a visible operational gap, not an automated on-call capability. The [runbook](docs/operations.md) covers diagnosis, rotation, a kill switch, rollback, and retained-resource cleanup.
+
+### Keep the chat as a thin client of the API
+
+Plain HTML, JavaScript, and CSS provide a usable chat without a frontend framework, build pipeline, external assets, or analytics. Serving them from the same Lambda keeps browser requests on the same origin and reuses the API's authentication and scope controls. Text rendering and a restrictive Content Security Policy reduce browser execution paths.
+
+The accepted cost is that public asset requests also invoke Lambda, and the page offers only a small chat/history interface. Tokens stay in memory, so refreshing requires reconnecting. A static CDN frontend and full sign-in flow would be reasonable once traffic or identity requirements justify operating them.
 
 ## Guardrails and limits
 
@@ -79,33 +141,80 @@ Each question is sent to the OpenAI Responses API using the server-side project 
 
 This demonstrates security and audit controls; it does **not** assert SOC 2, SOC 1, or regulatory compliance. OpenAI receives the submitted question and fixed policy, with `store: false`; this disables stored Responses state, not all provider retention. Review the project's data controls before sending sensitive data. A ChatGPT subscription does not supply API credits; the dedicated OpenAI project key requires API billing. [OpenAI data controls](https://developers.openai.com/api/docs/guides/your-data), [function calling](https://developers.openai.com/api/docs/guides/function-calling).
 
-## Run tests and deploy
+## Verify locally
 
-Prerequisites: Python 3.13+, AWS CLI v2, an AWS deployment identity able to manage the resources in `infra/`, a public Route 53 zone, and a **same-region** Secrets Manager secret with JSON field `api_key` containing a dedicated OpenAI project key. Create the key and secret privately in the provider/AWS consoles; never commit either value. The deployed instance uses `us-east-1`.
+From the cloned repository, use Python 3.13+ (for example, `python3.13` on macOS) to create an isolated environment:
 
 ```bash
-python3 -m venv .venv
+python3.13 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements-dev.txt
+python -m pip install -r requirements-dev.txt
 python -m pytest -q
 cfn-lint infra/bootstrap.json infra/service.json
+python scripts/package.py
+```
 
+After dependency installation, these checks run offline with mocked AWS, OpenAI, and Treasury boundaries. They need no credentials and do not change deployed history. Packaging writes `build/askbrieves.zip` and `build/sha256.txt`. CI repeats the same test/lint/package path on Python 3.13.
+
+Tests cover valid lookups and comparisons as well as malformed tools, prompt/scope boundaries, authentication and expiry, audience isolation, atomic quota behavior, unsafe XML, missing dates, stale/future data, persistence failures, and browser rendering contracts. Mocks establish code behavior; they do not prove provider availability or live-model policy compliance.
+
+There is no local HTTP server or AWS emulator included. The CLI talks to an HTTPS deployment; local development verification exercises the handler through tests.
+
+## Deploy into your AWS account
+
+### Prerequisites and credentials
+
+Use the environment above, AWS CLI v2, and an authenticated deployment profile authorized to manage the resources declared in `infra/`, including the IAM role. You also need:
+
+- A dedicated OpenAI project key with API billing, saved privately in a **same-region** Secrets Manager secret as JSON with an `api_key` field. Create it in the provider/AWS consoles; pass only its ARN to deployment. The template assumes the AWS-managed Secrets Manager encryption key; customer-managed KMS keys need additional scoped decrypt permission.
+- A public Route 53 hosted zone and an unused hostname inside it. ACM uses that zone for DNS validation. The existing instance is in `us-east-1`; the example below also uses that region.
+
+These are three distinct credentials: AWS credentials deploy infrastructure, the OpenAI project key authorizes server-side model calls, and the generated service bearer token authorizes chat/API clients. A reviewer token for the hosted service grants no AWS deployment access.
+
+### Provision and deploy
+
+Replace the placeholders with your secret ARN, zone ID, and hostname. Use a separate stack name when deploying alongside an existing instance.
+
+```bash
 # Authenticate the AWS CLI using your normal SSO/profile workflow first.
-AWS_PROFILE=your-profile bash scripts/deploy.sh us-east-1 \
+AWS_PROFILE=your-profile ASKBRIEVES_STACK=askbrieves-alex \
+  bash scripts/deploy.sh us-east-1 \
   'arn:aws:secretsmanager:us-east-1:YOUR_ACCOUNT:secret:YOUR_SECRET' \
   'YOUR_HOSTED_ZONE_ID' askbrieves.your-domain.com
 ```
 
-The script tests/lints, packages, deploys `askbrieves-artifacts`, uploads a SHA-256-addressed artifact, then deploys `askbrieves` with `CAPABILITY_IAM`. Review the templates and CloudFormation change set when adapting this to another account. ACM creates its DNS validation record in the supplied zone. The custom domain has TLS 1.2 minimum and IPv4/IPv6 aliases; the default execute-api endpoint is disabled. For a disposable alternate stack, set `ASKBRIEVES_STACK=askbrieves-test` and use another domain.
+The script tests/lints, packages, deploys `<stack>-artifacts`, uploads the package under its SHA-256, and deploys `<stack>` with `CAPABILITY_IAM`. It **executes infrastructure changes immediately**; it does not pause for change-set approval. Inspect both templates before running it. Where change-set approval is required, create, inspect, and execute the CloudFormation changes explicitly instead of treating this script as a preview.
+
+The service stack prints `Endpoint`, `ApiAccessSecretArn`, and operational resource outputs. In Secrets Manager, open the generated API-access secret privately and use its `token` field to connect to your endpoint. The deployment creates TLS 1.2 minimum, IPv4/IPv6 DNS aliases, and disables the default execute-api endpoint when a custom domain is configured. For a default deployment, omitting `ASKBRIEVES_STACK` selects `askbrieves`.
 
 The default `ReservedConcurrency=-1` omits a Lambda reservation and shares existing account capacity. The script does not request a quota increase. An optional positive `ASKBRIEVES_RESERVED_CONCURRENCY` setting reserves and limits function capacity when the regional account has enough available; the API throttle and daily request cap apply in either mode.
 
-Get the generated demo token privately from the stack's `ApiAccessSecretArn` output in the Secrets Manager console. Do not put the token in tickets, screenshots, commands, or deployment files. The client accepts a hidden prompt; CI tests mock dependencies. For a live acceptance test, inject `ASKBRIEVES_TOKEN` into the process securely and run `python scripts/smoke.py`. See [operations](docs/operations.md) for rotation, incident handling, rollback, and teardown.
-
 Optional reviewer access uses `reviewer_token` and integer UTC epoch `reviewer_expires_at` fields in the same secret, preserving the existing owner `token`. Reviewer tokens accept 12–512 characters and require a future expiry; owner tokens remain 20–512 characters. Distribute values privately, never through this public repository. Both audiences share the global daily allowance. A memorable reviewer credential is suitable only for a short-lived, bounded demo; use high-entropy credentials for production.
 
-## Operational choices and next steps
+### Verify your deployment
+
+Open the printed endpoint and connect with its service token, or run the client with `--url` and its hidden token prompt. For the extended real-provider acceptance suite, the following prompts without putting a token literal in shell history:
+
+```bash
+ASKBRIEVES_URL=https://askbrieves.your-domain.com python - <<'PY'
+import getpass
+import os
+import subprocess
+import sys
+
+os.environ["ASKBRIEVES_TOKEN"] = getpass.getpass("AskBrieves bearer token: ")
+subprocess.run([sys.executable, "scripts/smoke.py"], check=True)
+PY
+```
+
+The live suite requires working AWS/provider configuration behind the endpoint, uses real OpenAI/Treasury calls, consumes **11 daily attempts**, and writes **11 synthetic history entries**. Use an operator/test audience rather than a fresh reviewer audience you want to hand over empty. `ASKBRIEVES_URL` is required for another deployment; otherwise the suite targets Brian's hosted service. A passing health check alone does not establish these dependencies are working.
+
+See [operations](docs/operations.md) before changing quotas or credentials, stopping the function, rolling back an artifact, or deleting stacks. Retained data, secrets, artifacts, and DNS validation records require explicit cleanup after stack deletion.
+
+## Evidence, costs, and next steps
+
+The [reviewer capability verification](docs/verification-reviewer.md), [historical release proof](docs/verification-historical.md), and [initial deployment evidence](docs/verification.md) record dated tests, artifact digests, deployment readbacks, and sanitized request/log evidence. The reviewer release includes an offline Codex Security assessment with its scope and limitations. These are recorded observations, not a promise that an endpoint, credential, or dependency remains healthy today.
 
 Costs come from API/Lambda requests, DynamoDB requests/storage/PITR, two Secrets Manager secrets, logs, alarms, artifacts, and DNS. There is no NAT gateway, VPC, load balancer, container host, or database instance. The pinned model is `gpt-5.4-mini-2026-03-17`, with reasoning disabled for this small classification task. Review [current model pricing](https://developers.openai.com/api/docs/models/gpt-5.4-mini) and AWS pricing before raising the quota. Project budget alerts are useful but are not an application spending cutoff; unauthenticated traffic can still incur AWS request costs.
 
-This service prioritizes deployability, explicit security boundaries, negative tests, and a usable runbook. Before a real multi-client rollout I would replace audience credentials with per-client identity and authorization, add WAF or an appropriate edge control and per-client quotas, connect alarms to an owned paging channel, define measured availability/latency SLOs, and add managed synthetic checks and a proper policy evaluation dataset. A multi-region system and an institutional compliance program are beyond this demo's scope.
+The next investments follow the current limits: per-client identity and quotas for isolation, an appropriate edge abuse control for public traffic, owned paging and measured availability/latency objectives for operations, and a larger model-policy evaluation dataset before expanding scope. A cache or static CDN should follow observed source load or asset traffic. Multi-region infrastructure would add complexity before there is a demonstrated recovery or availability requirement.
