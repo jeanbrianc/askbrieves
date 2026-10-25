@@ -1,0 +1,463 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "AskBrieves bounded Treasury rates assistant: HTTP API, Lambda, history, secrets, custom domain and operational alarms.",
+  "Parameters": {
+    "ArtifactBucket": {
+      "Type": "String",
+      "AllowedPattern": "[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]",
+      "Description": "Existing private S3 bucket in this region containing the Lambda zip."
+    },
+    "ArtifactKey": {
+      "Type": "String",
+      "MinLength": 1,
+      "MaxLength": 1024,
+      "Description": "Immutable S3 object key, changed for each code release and rollback."
+    },
+    "OpenAISecretArn": {
+      "Type": "String",
+      "AllowedPattern": "arn:[a-z0-9-]+:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:.+",
+      "Description": "Existing same-region Secrets Manager ARN with JSON api_key field; pass its ARN, never its value."
+    },
+    "OpenAIModel": {
+      "Type": "String",
+      "Default": "gpt-5.4-mini-2026-03-17",
+      "AllowedPattern": "[a-zA-Z0-9_.:-]{1,100}",
+      "Description": "Pinned Responses API model supporting strict function calling and reasoning effort none."
+    },
+    "DailyRequestLimit": {
+      "Type": "Number",
+      "Default": 100,
+      "MinValue": 1,
+      "MaxValue": 1000,
+      "Description": "Global UTC daily limit on authenticated model attempts, including declined questions."
+    },
+    "ReservedConcurrency": {
+      "Type": "Number",
+      "Default": -1,
+      "AllowedValues": [-1, 1, 2, 3, 4, 5, 10],
+      "Description": "Function concurrency reservation; -1 omits the reservation and uses the existing shared account quota."
+    },
+    "HistoryDays": {
+      "Type": "Number",
+      "Default": 30,
+      "MinValue": 1,
+      "MaxValue": 90,
+      "Description": "History visibility and DynamoDB TTL retention in days; TTL deletion is asynchronous."
+    },
+    "MaxDataAgeDays": {
+      "Type": "Number",
+      "Default": 7,
+      "MinValue": 1,
+      "MaxValue": 14,
+      "Description": "Maximum Treasury observation age in calendar days."
+    },
+    "DomainName": {
+      "Type": "String",
+      "Default": "askbrieves.brianjeanbuilds.com",
+      "AllowedPattern": "^$|^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$",
+      "Description": "Custom HTTPS hostname; empty enables the default execute-api endpoint instead."
+    },
+    "HostedZoneId": {
+      "Type": "String",
+      "Default": "",
+      "AllowedPattern": "^$|^Z[A-Z0-9]+$",
+      "Description": "Public Route 53 zone containing DomainName, without /hostedzone/ prefix."
+    }
+  },
+  "Rules": {
+    "CustomDomainRequiresHostedZone": {
+      "RuleCondition": {"Fn::Not": [{"Fn::Equals": [{"Ref": "DomainName"}, ""]}]},
+      "Assertions": [
+        {
+          "Assert": {"Fn::Not": [{"Fn::Equals": [{"Ref": "HostedZoneId"}, ""]}]},
+          "AssertDescription": "HostedZoneId is required when DomainName is configured."
+        }
+      ]
+    }
+  },
+  "Conditions": {
+    "HasCustomDomain": {"Fn::Not": [{"Fn::Equals": [{"Ref": "DomainName"}, ""]}]},
+    "HasReservedConcurrency": {"Fn::Not": [{"Fn::Equals": [{"Ref": "ReservedConcurrency"}, "-1"]}]}
+  },
+  "Resources": {
+    "History": {
+      "Type": "AWS::DynamoDB::Table",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "BillingMode": "PAY_PER_REQUEST",
+        "AttributeDefinitions": [
+          {"AttributeName": "pk", "AttributeType": "S"},
+          {"AttributeName": "sk", "AttributeType": "S"}
+        ],
+        "KeySchema": [
+          {"AttributeName": "pk", "KeyType": "HASH"},
+          {"AttributeName": "sk", "KeyType": "RANGE"}
+        ],
+        "SSESpecification": {"SSEEnabled": true},
+        "PointInTimeRecoverySpecification": {"PointInTimeRecoveryEnabled": true},
+        "TimeToLiveSpecification": {"AttributeName": "expires_at", "Enabled": true},
+        "Tags": [{"Key": "Application", "Value": "askbrieves"}]
+      }
+    },
+    "ApiAccessSecret": {
+      "Type": "AWS::SecretsManager::Secret",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "Description": "AskBrieves shared demo API bearer credential; rotating it revokes all demo clients after the short application cache.",
+        "GenerateSecretString": {
+          "SecretStringTemplate": "{}",
+          "GenerateStringKey": "token",
+          "PasswordLength": 48,
+          "ExcludePunctuation": true,
+          "IncludeSpace": false
+        },
+        "Tags": [{"Key": "Application", "Value": "askbrieves"}]
+      }
+    },
+    "FunctionLogs": {
+      "Type": "AWS::Logs::LogGroup",
+      "Properties": {
+        "LogGroupName": {"Fn::Sub": "/aws/lambda/${AWS::StackName}-api"},
+        "RetentionInDays": 14
+      }
+    },
+    "ApiLogs": {
+      "Type": "AWS::Logs::LogGroup",
+      "Properties": {
+        "RetentionInDays": 14
+      }
+    },
+    "FunctionRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {"Service": "lambda.amazonaws.com"},
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "ApplicationResourcesOnly",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Sid": "ReadOnlyRequiredSecrets",
+                  "Effect": "Allow",
+                  "Action": "secretsmanager:GetSecretValue",
+                  "Resource": [{"Ref": "OpenAISecretArn"}, {"Ref": "ApiAccessSecret"}]
+                },
+                {
+                  "Sid": "HistoryAndBoundedQuota",
+                  "Effect": "Allow",
+                  "Action": ["dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:Query"],
+                  "Resource": {"Fn::GetAtt": ["History", "Arn"]}
+                },
+                {
+                  "Sid": "WriteApplicationLogs",
+                  "Effect": "Allow",
+                  "Action": ["logs:CreateLogStream", "logs:PutLogEvents"],
+                  "Resource": {"Fn::GetAtt": ["FunctionLogs", "Arn"]}
+                }
+              ]
+            }
+          }
+        ],
+        "Tags": [{"Key": "Application", "Value": "askbrieves"}]
+      }
+    },
+    "Function": {
+      "Type": "AWS::Lambda::Function",
+      "Properties": {
+        "FunctionName": {"Fn::Sub": "${AWS::StackName}-api"},
+        "Description": "Authenticated, bounded Treasury yields question service.",
+        "Runtime": "python3.13",
+        "Architectures": ["arm64"],
+        "Handler": "askbrieves.handler.lambda_handler",
+        "MemorySize": 256,
+        "Timeout": 28,
+        "ReservedConcurrentExecutions": {"Fn::If": ["HasReservedConcurrency", {"Ref": "ReservedConcurrency"}, {"Ref": "AWS::NoValue"}]},
+        "Role": {"Fn::GetAtt": ["FunctionRole", "Arn"]},
+        "Code": {
+          "S3Bucket": {"Ref": "ArtifactBucket"},
+          "S3Key": {"Ref": "ArtifactKey"}
+        },
+        "Environment": {
+          "Variables": {
+            "TABLE_NAME": {"Ref": "History"},
+            "OPENAI_SECRET_ARN": {"Ref": "OpenAISecretArn"},
+            "API_SECRET_ARN": {"Ref": "ApiAccessSecret"},
+            "OPENAI_MODEL": {"Ref": "OpenAIModel"},
+            "DAILY_REQUEST_LIMIT": {"Ref": "DailyRequestLimit"},
+            "HISTORY_DAYS": {"Ref": "HistoryDays"},
+            "MAX_DATA_AGE_DAYS": {"Ref": "MaxDataAgeDays"}
+          }
+        },
+        "Tags": [{"Key": "Application", "Value": "askbrieves"}]
+      }
+    },
+    "Api": {
+      "Type": "AWS::ApiGatewayV2::Api",
+      "Properties": {
+        "Name": {"Fn::Sub": "${AWS::StackName}-api"},
+        "ProtocolType": "HTTP",
+        "IpAddressType": "dualstack",
+        "DisableExecuteApiEndpoint": {"Fn::If": ["HasCustomDomain", true, false]},
+        "Tags": {"Application": "askbrieves"}
+      }
+    },
+    "Integration": {
+      "Type": "AWS::ApiGatewayV2::Integration",
+      "Properties": {
+        "ApiId": {"Ref": "Api"},
+        "IntegrationType": "AWS_PROXY",
+        "IntegrationUri": {"Fn::GetAtt": ["Function", "Arn"]},
+        "PayloadFormatVersion": "2.0",
+        "TimeoutInMillis": 29000
+      }
+    },
+    "RootRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Properties": {
+        "ApiId": {"Ref": "Api"},
+        "RouteKey": "GET /",
+        "AuthorizationType": "NONE",
+        "Target": {"Fn::Sub": "integrations/${Integration}"}
+      }
+    },
+    "ScriptRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Properties": {
+        "ApiId": {"Ref": "Api"},
+        "RouteKey": "GET /app.js",
+        "AuthorizationType": "NONE",
+        "Target": {"Fn::Sub": "integrations/${Integration}"}
+      }
+    },
+    "StylesRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Properties": {
+        "ApiId": {"Ref": "Api"},
+        "RouteKey": "GET /styles.css",
+        "AuthorizationType": "NONE",
+        "Target": {"Fn::Sub": "integrations/${Integration}"}
+      }
+    },
+    "BrandRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Properties": {
+        "ApiId": {"Ref": "Api"},
+        "RouteKey": "GET /brand.png",
+        "AuthorizationType": "NONE",
+        "Target": {"Fn::Sub": "integrations/${Integration}"}
+      }
+    },
+    "HealthRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Properties": {
+        "ApiId": {"Ref": "Api"},
+        "RouteKey": "GET /health",
+        "AuthorizationType": "NONE",
+        "Target": {"Fn::Sub": "integrations/${Integration}"}
+      }
+    },
+    "QuestionsRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Properties": {
+        "ApiId": {"Ref": "Api"},
+        "RouteKey": "POST /questions",
+        "AuthorizationType": "NONE",
+        "Target": {"Fn::Sub": "integrations/${Integration}"}
+      }
+    },
+    "HistoryRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Properties": {
+        "ApiId": {"Ref": "Api"},
+        "RouteKey": "GET /history",
+        "AuthorizationType": "NONE",
+        "Target": {"Fn::Sub": "integrations/${Integration}"}
+      }
+    },
+    "Stage": {
+      "Type": "AWS::ApiGatewayV2::Stage",
+      "DependsOn": ["RootRoute", "ScriptRoute", "StylesRoute", "BrandRoute", "HealthRoute", "QuestionsRoute", "HistoryRoute"],
+      "Properties": {
+        "ApiId": {"Ref": "Api"},
+        "StageName": "$default",
+        "AutoDeploy": true,
+        "DefaultRouteSettings": {
+          "ThrottlingRateLimit": 1,
+          "ThrottlingBurstLimit": 2
+        },
+        "AccessLogSettings": {
+          "DestinationArn": {"Fn::GetAtt": ["ApiLogs", "Arn"]},
+          "Format": "{\"request_id\":\"$context.requestId\",\"route\":\"$context.routeKey\",\"status\":\"$context.status\",\"latency_ms\":\"$context.responseLatency\"}"
+        },
+        "Tags": {"Application": "askbrieves"}
+      }
+    },
+    "InvokePermission": {
+      "Type": "AWS::Lambda::Permission",
+      "Properties": {
+        "Action": "lambda:InvokeFunction",
+        "FunctionName": {"Ref": "Function"},
+        "Principal": "apigateway.amazonaws.com",
+        "SourceAccount": {"Ref": "AWS::AccountId"},
+        "SourceArn": {"Fn::Sub": "arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${Api}/*/*/*"}
+      }
+    },
+    "Certificate": {
+      "Type": "AWS::CertificateManager::Certificate",
+      "Condition": "HasCustomDomain",
+      "Properties": {
+        "DomainName": {"Ref": "DomainName"},
+        "ValidationMethod": "DNS",
+        "DomainValidationOptions": [
+          {"DomainName": {"Ref": "DomainName"}, "HostedZoneId": {"Ref": "HostedZoneId"}}
+        ],
+        "Tags": [{"Key": "Application", "Value": "askbrieves"}]
+      }
+    },
+    "ApiDomain": {
+      "Type": "AWS::ApiGatewayV2::DomainName",
+      "Condition": "HasCustomDomain",
+      "Properties": {
+        "DomainName": {"Ref": "DomainName"},
+        "DomainNameConfigurations": [
+          {
+            "CertificateArn": {"Ref": "Certificate"},
+            "EndpointType": "REGIONAL",
+            "IpAddressType": "dualstack",
+            "SecurityPolicy": "TLS_1_2"
+          }
+        ],
+        "Tags": {"Application": "askbrieves"}
+      }
+    },
+    "ApiMapping": {
+      "Type": "AWS::ApiGatewayV2::ApiMapping",
+      "Condition": "HasCustomDomain",
+      "Properties": {
+        "ApiId": {"Ref": "Api"},
+        "DomainName": {"Ref": "ApiDomain"},
+        "Stage": {"Ref": "Stage"}
+      }
+    },
+    "DomainRecord": {
+      "Type": "AWS::Route53::RecordSet",
+      "Condition": "HasCustomDomain",
+      "Properties": {
+        "HostedZoneId": {"Ref": "HostedZoneId"},
+        "Name": {"Ref": "DomainName"},
+        "Type": "A",
+        "AliasTarget": {
+          "DNSName": {"Fn::GetAtt": ["ApiDomain", "RegionalDomainName"]},
+          "HostedZoneId": {"Fn::GetAtt": ["ApiDomain", "RegionalHostedZoneId"]},
+          "EvaluateTargetHealth": false
+        }
+      }
+    },
+    "DomainRecordIPv6": {
+      "Type": "AWS::Route53::RecordSet",
+      "Condition": "HasCustomDomain",
+      "Properties": {
+        "HostedZoneId": {"Ref": "HostedZoneId"},
+        "Name": {"Ref": "DomainName"},
+        "Type": "AAAA",
+        "AliasTarget": {
+          "DNSName": {"Fn::GetAtt": ["ApiDomain", "RegionalDomainName"]},
+          "HostedZoneId": {"Fn::GetAtt": ["ApiDomain", "RegionalHostedZoneId"]},
+          "EvaluateTargetHealth": false
+        }
+      }
+    },
+    "FunctionErrorsAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmDescription": "Unhandled Lambda errors. Inspect application logs; no notification destination is configured for this demo.",
+        "Namespace": "AWS/Lambda",
+        "MetricName": "Errors",
+        "Dimensions": [{"Name": "FunctionName", "Value": {"Ref": "Function"}}],
+        "Statistic": "Sum",
+        "Period": 60,
+        "EvaluationPeriods": 1,
+        "Threshold": 1,
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "TreatMissingData": "notBreaching"
+      }
+    },
+    "FunctionThrottlesAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmDescription": "Lambda concurrency exhausted. Inspect request load before increasing the bounded capacity.",
+        "Namespace": "AWS/Lambda",
+        "MetricName": "Throttles",
+        "Dimensions": [{"Name": "FunctionName", "Value": {"Ref": "Function"}}],
+        "Statistic": "Sum",
+        "Period": 60,
+        "EvaluationPeriods": 1,
+        "Threshold": 1,
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "TreatMissingData": "notBreaching"
+      }
+    },
+    "ApiServerErrorsAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmDescription": "API 5xx responses, including application dependency failures. Inspect metadata logs; no paging integration configured.",
+        "Namespace": "AWS/ApiGateway",
+        "MetricName": "5xx",
+        "Dimensions": [
+          {"Name": "ApiId", "Value": {"Ref": "Api"}},
+          {"Name": "Stage", "Value": "$default"}
+        ],
+        "Statistic": "Sum",
+        "Period": 60,
+        "EvaluationPeriods": 1,
+        "Threshold": 1,
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "TreatMissingData": "notBreaching"
+      }
+    }
+  },
+  "Outputs": {
+    "Endpoint": {
+      "Description": "HTTPS API base URL.",
+      "Value": {
+        "Fn::If": [
+          "HasCustomDomain",
+          {"Fn::Sub": "https://${DomainName}"},
+          {"Fn::Sub": "https://${Api}.execute-api.${AWS::Region}.${AWS::URLSuffix}"}
+        ]
+      }
+    },
+    "FunctionName": {
+      "Description": "Lambda function name for smoke invocation and kill switch operations.",
+      "Value": {"Ref": "Function"}
+    },
+    "HistoryTable": {
+      "Description": "Retained encrypted DynamoDB history and quota table.",
+      "Value": {"Ref": "History"}
+    },
+    "FunctionLogGroup": {
+      "Description": "Application metadata logs, retained for 14 days.",
+      "Value": {"Ref": "FunctionLogs"}
+    },
+    "ApiLogGroup": {
+      "Description": "Request metadata logs, without request bodies or credentials.",
+      "Value": {"Ref": "ApiLogs"}
+    },
+    "ApiAccessSecretArn": {
+      "Description": "Secrets Manager ARN containing demo bearer credential under JSON token; this output contains no secret value.",
+      "Value": {"Ref": "ApiAccessSecret"}
+    }
+  }
+}

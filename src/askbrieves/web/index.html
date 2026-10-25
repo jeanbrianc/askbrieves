@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>AskBrieves</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="header">
+    <a class="wordmark" href="/" aria-label="AskBrieves home">Ask<span>Brieves</span><i aria-hidden="true"></i></a>
+    <nav aria-label="Chat actions">
+      <button id="clear-button" class="icon-button" type="button" aria-label="Clear this chat" title="Clear chat">↺</button>
+      <button id="history-button" class="nav-button" type="button">History</button>
+      <button id="access-button" class="nav-button access-button" type="button">Access</button>
+    </nav>
+  </header>
+
+  <main class="chat">
+    <div id="conversation" class="conversation" role="log" aria-label="Conversation" aria-live="polite" aria-relevant="additions text" tabindex="0">
+      <section class="empty-state" id="empty-state" aria-label="Welcome to AskBrieves">
+        <img src="/brand.png" class="brand-image" alt="AskBrieves finance mascot" width="340" height="255">
+        <h1>Ask about rates.</h1>
+        <div class="suggestions" aria-label="Example questions">
+          <button class="suggestion" type="button" data-question="What's the 10-year Treasury yield?">10-year Treasury yield <span aria-hidden="true">↗</span></button>
+          <button class="suggestion" type="button" data-question="Compare the 2-year and 10-year Treasury yields.">2-year vs. 10-year <span aria-hidden="true">↗</span></button>
+        </div>
+      </section>
+    </div>
+
+    <div class="composer-wrap">
+      <p id="notice" class="notice" role="status" aria-live="polite"></p>
+      <form id="question-form" class="composer">
+        <label class="sr-only" for="question">Your question</label>
+        <textarea id="question" rows="1" maxlength="500" placeholder="Ask about Treasury yields…" required></textarea>
+        <button id="send-button" class="send-button" type="submit" aria-label="Send question" disabled><span aria-hidden="true">↑</span></button>
+      </form>
+      <p class="fine-print">Treasury data <span aria-hidden="true">·</span> Not financial advice</p>
+    </div>
+  </main>
+
+  <dialog id="access-dialog" aria-labelledby="access-title">
+    <div class="dialog-heading"><h2 id="access-title">Connect</h2><button id="close-access" class="icon-button" type="button" aria-label="Close access dialog">×</button></div>
+    <form id="access-form">
+      <label for="access-token">Access token</label>
+      <input id="access-token" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="512" placeholder="Paste token" required>
+      <p class="dialog-hint">Only kept in this tab.</p>
+      <div class="dialog-actions"><button id="disconnect-button" class="nav-button" type="button" hidden>Disconnect</button><button class="continue-button" type="submit">Continue →</button></div>
+    </form>
+  </dialog>
+</body>
+</html>
