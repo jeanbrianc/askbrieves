@@ -2,7 +2,7 @@
 
 ## Ownership and signals
 
-The demo has one owner and one shared bearer credential. `GET /health` is **liveness only**: it confirms code is responding, not that OpenAI, Treasury, or history is available. `scripts/smoke.py` exercises the authenticated end-to-end path, refusals, and persisted history using a few requests from the daily quota.
+The demo has one owner and one shared bearer credential. `GET /health` is **liveness only**: it confirms code is responding, not that OpenAI, Treasury, or history is available. `scripts/smoke.py` exercises latest and historical lookups, date comparisons, no-data handling, refusals, and persisted history. Each authenticated question consumes a daily attempt, including refusals and no-data results.
 
 The public `/` page is a small chat interface; `/app.js`, `/styles.css`, and the supplied `/brand.png` are public assets served through the same Lambda. Access opens a compact token dialog. Enter the demo bearer token, never the OpenAI API key. The token stays in memory, without browser storage or cookies. Questions and the shared read-only history still require API authentication. The Content Security Policy permits only same-origin assets and connections. The CLI remains available.
 
@@ -22,10 +22,13 @@ The initial service objective is operational evidence, not a measured availabili
 | 401 | Verify bearer credential and header through a private channel. A rotated token may take up to 60 seconds to replace the runtime cache. Do not paste headers into logs. |
 | 400 | One JSON `question` field, 1–500 characters, no controls, no query parameters, no obvious credentials; body <=4 KiB. |
 | 429 | Gateway burst/rate capacity or global daily limit. Daily count resets by UTC date; declined/failed attempts consume quota. Do not raise the limit to silence unexplained load. |
-| 503 | Inspect metadata outcomes, provider service status, secret metadata/IAM, and Treasury source availability. Never disable screening or freshness checks to restore an answer. |
+| 200 `no_data` | The exact requested date or maturity was not published. Check the readable monthly `source_url` and XML `data_url`; do not replace a weekend/holiday with a neighboring date. This is a domain result, not a dependency outage. |
+| 503 | Inspect metadata outcomes, provider service status, secret metadata/IAM, and Treasury source availability or invalid data. Never disable screening, date validation, or freshness checks to restore an answer. |
 | Pending history | A process died or persistence failed. The 28-second hard Lambda timeout bounds work; cumulative dependency delays can exhaust it. A pending record is not a completed answer. Retry is a new request and consumes quota. |
-| Wrong/old rate | Inspect returned observation date/source, compare official Treasury feed, stop serving if integrity is doubtful. Source must be <=7 calendar days old by default. |
+| Wrong/old rate | Inspect each returned observation date and official source. Latest observations must be <=7 calendar days old by default; explicit historical dates must match exactly and lie between 1990-01-02 and today's New York date. A historical result is not subject to the latest-data freshness window. Stop serving if integrity is doubtful. |
 | Timeout / throttles | Inspect API latency, Lambda concurrency, and provider rate limits. The gateway integration timeout is 29 seconds, Lambda 28 seconds; no provider retries. Lambda shares account concurrency capacity by default, so other functions can consume that capacity. Avoid scaling before understanding costs. |
+
+A question can select at most two maturities and two dates, with `latest` allowed alongside one exact date. One OpenAI call selects the bounded lookup; Python validates dates and maturities. Up to three monthly source downloads cover the requested dates and any latest-month fallback. Single-date evidence retains the `as_of`/`rates` shape; a date comparison uses `evidence.observations`. Each observation links to a readable monthly table (`source_url`) and its raw XML (`data_url`). No AWS resources or deployment parameters change for historical support.
 
 ## Stop, rotate, restore
 

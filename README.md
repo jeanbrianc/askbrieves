@@ -1,6 +1,6 @@
 # AskBrieves
 
-A small agentic service that answers questions about **latest published U.S. Treasury par yields**. Built for the ModernFi platform engineering take-home, with the emphasis on bounded behavior, repeatable deployment, and clear operational tradeoffs.
+A small agentic service that answers questions about **latest and dated U.S. Treasury par yields**. Built for the ModernFi platform engineering take-home, with the emphasis on bounded behavior, repeatable deployment, and clear operational tradeoffs.
 
 Open the chat at **https://askbrieves.brianjeanbuilds.com**. The page, its assets, and `GET /health` are public; questions and history require the demo bearer token. Deployment evidence is recorded in [docs/verification.md](docs/verification.md).
 
@@ -13,17 +13,22 @@ The command-line client is also available. Python 3.13+ is sufficient; no packag
 ```bash
 python3 scripts/client.py "What's the 10-year Treasury yield?"
 python3 scripts/client.py "Compare the 2-year and 10-year Treasury yields"
+python3 scripts/client.py "What was the 10 year rate on October 23rd, 2025?"
+python3 scripts/client.py "Compare the 2-year and 10-year Treasury yields on October 23rd, 2025"
+python3 scripts/client.py "Compare the 10-year Treasury yield on 2025-10-23 with the latest yield"
 python3 scripts/client.py --history
 curl --fail https://askbrieves.brianjeanbuilds.com/health
 ```
 
-The API accepts `POST /questions`, JSON `{"question":"What's the 10-year Treasury yield?"}`, and `Authorization: Bearer <token>`. It returns JSON containing a plain-language `answer`, `status`, `request_id`, and source evidence for answered questions. `GET /history` returns the newest 20 records. Authentication failures are 401; malformed inputs 400; exhausted daily quota 429; unavailable dependencies or unverifiable data 503. A deliberate scope refusal is 200 with `status: declined` and a fixed explanation.
+The API accepts `POST /questions`, JSON `{"question":"What's the 10-year Treasury yield?"}`, and `Authorization: Bearer <token>`. It returns JSON containing a plain-language `answer`, `status`, `request_id`, and source evidence for answered questions. `GET /history` returns the newest 20 records. Authentication failures are 401; malformed inputs 400; exhausted daily quota 429; unavailable dependencies or invalid data 503. A deliberate scope refusal is 200 with `status: declined`. A supported date with no published observation or requested maturity is 200 with `status: no_data`; the service explains the gap without substituting another date or tenor.
 
 Example answer shape (illustrative values, not a current quote):
 
-> As of YYYY-MM-DD, the 10-year yield was X.XX%. These are daily U.S. Treasury par yields, not live quotes or deposit APYs. Source: [dated Treasury XML feed]
+> As of YYYY-MM-DD, the 10-year yield was X.XX%. These are daily U.S. Treasury par yields, not live quotes or deposit APYs. Source: [Treasury monthly table]
 
-Supported maturities: 1, 2, 3, 4, 6 months; 1, 2, 3, 5, 7, 10, 20, 30 years. A question may request one yield or compare two. Other products, historical dates, predictions, investment advice, ambiguous questions, and unrelated or mixed requests are declined. This scope keeps the data semantics explicit instead of substituting a Treasury yield for a mortgage or deposit rate.
+Supported maturities: 1, 2, 3, 4, 6 months; 1, 2, 3, 5, 7, 10, 20, 30 years. A question may request up to two maturities and two dates, including a comparison with the latest observation. Exact dates must be between `1990-01-02` and today's date in New York. A historical lookup requires that exact observation date: weekends, holidays, and maturities not published then return `no_data`. Latest lookups use the last published observation, at most seven calendar days old. Other rate products, future or ambiguous dates, predictions, investment advice, and unrelated or mixed requests are declined.
+
+Single-date evidence contains `as_of`, `rates`, a readable Treasury monthly `source_url`, and the raw XML `data_url`. Two-date evidence contains an `observations` list with that same evidence structure for each date. Dates and numeric values are formatted by the application from the verified source data.
 
 ## How it works and why
 
@@ -38,8 +43,8 @@ flowchart LR
 ```
 
 1. Authenticate, validate a body of at most 4 KiB and a question of at most 500 characters, atomically claim one of 100 daily attempts, and save a pending history entry.
-2. Make **one** OpenAI Responses API call. A strict function schema offers only `lookup_treasury_yields` and `decline_question`. The model reviews the entire question and chooses an action. Python independently validates the result, including tool count, names, fields, and maturity enums.
-3. For an allowed lookup, execute the fixed Treasury adapter. Select the latest dated row, require all requested yields from that same row, reject missing or invalid values, and reject observations more than seven calendar days old or in the future. At a month boundary, an empty current month permits a previous-month fetch. Weekends therefore show the last published observation with its date.
+2. Make **one** OpenAI Responses API call. A strict function schema offers only `lookup_treasury_yields` and `decline_question`. The model reviews the entire question and chooses an action. Python independently validates tool count, names, fields, maturity enums, and date bounds.
+3. Execute the fixed Treasury adapter with at most three monthly downloads per request: two requested months and, if needed, a previous-month fallback for latest. Latest observations must be no more than seven calendar days old and never in the future. Historical lookups select the exact requested row, with no weekend or holiday substitution. Missing observations or tenors return `no_data`; invalid source data fails closed. Each comparison uses the requested maturities from the same dated row.
 4. Format the answer and any basis-point spread in Python, then persist the result **before** returning it. The model supplies neither numeric rates nor arbitrary final prose.
 
 This is a constrained, single-step tool-using agent. An open-ended loop, vector database, multi-agent framework, and a second LLM answer-writing call add little value here. The final answer is grounded by construction, even if the probabilistic scope gate makes a mistake. The model cannot read history, retrieve AWS resources, browse a submitted URL, or execute code.
@@ -60,8 +65,8 @@ This is a constrained, single-step tool-using agent. An open-ended loop, vector 
 |---|---|
 | Access | Generated 48-character bearer secret, constant-time comparison, HTTPS only. One shared demo audience; holders can read all demo history. No tenant isolation claim. |
 | Agent authority | One model call; two schema-constrained actions; no generic tools; local validation; fixed numeric/prose output path. Scope classification is probabilistic, not a formal guarantee. |
-| Data integrity | Fixed Treasury host/path, redirects disabled, XML DTD/entities rejected, 1 MiB source cap, dated/freshness-checked observations, decimal arithmetic. No invented fallback rates. |
-| Cost containment | API target 1 request/second, burst 2; global atomic 100 attempts per UTC day; 256 output tokens per call; no automatic provider retry. Lambda shares existing account concurrency capacity by default. Refusals and failed attempts consume quota. Gateway throttling is best effort; this is not a hard dollar cap. |
+| Data integrity | Fixed Treasury host/path, redirects disabled, XML DTD/entities rejected, 1 MiB source cap, locally validated dates, exact historical observations, freshness checks for latest, decimal arithmetic. Missing data is reported explicitly; no invented fallback rates. |
+| Cost containment | API target 1 request/second, burst 2; global atomic 100 attempts per UTC day; one model call with 256 output tokens; at most three monthly source downloads; no automatic provider retry. Lambda shares existing account concurrency capacity by default. Refusals, no-data results, and failed attempts consume quota. Gateway throttling is best effort; this is not a hard dollar cap. |
 | Secrets / IAM | Secret ARNs in config, values fetched only by runtime, 60-second cache. Function permissions name its two secrets, its one table, and its log group. No trading, account access, or general AWS authority. |
 | History / privacy | Accepted questions, decisions, and answers retained for 30 days; query hides expired history even before asynchronous TTL deletion. No prompts, answers, tokens, IPs, or provider bodies in application/access logs; log retention 14 days. Do not submit PII or credentials. Obvious API/AWS key patterns are rejected, not comprehensive PII detection. |
 | Fail closed | Auth, model, source, quota-store, or history-store errors cannot produce a successful rate answer. A crash/timeout can leave a pending history entry; retries are new attempts, with no exactly-once promise. |

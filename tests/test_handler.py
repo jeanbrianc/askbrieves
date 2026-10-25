@@ -6,7 +6,7 @@ import pytest
 
 from askbrieves import handler
 from askbrieves.planner import PlannerUnavailable
-from askbrieves.rates import RatesUnavailable
+from askbrieves.rates import RatesNotPublished, RatesUnavailable
 
 TOKEN = "t" * 40
 QUESTION = "What's the 10-year Treasury yield?"
@@ -34,7 +34,7 @@ def deps(monkeypatch):
     dependencies["secret"].side_effect = lambda arn, field: TOKEN if field == "token" else "provider-key"
     dependencies["start_history"].return_value = {"status": "pending"}
     dependencies["recent_history"].return_value = []
-    dependencies["plan"] = Mock(return_value={"action": "lookup", "maturities": ["10y"]})
+    dependencies["plan"] = Mock(return_value={"action": "lookup", "maturities": ["10y"], "dates": ["latest"]})
     dependencies["fetch"] = Mock(return_value=EVIDENCE)
     monkeypatch.setattr(handler, "plan_question", dependencies["plan"])
     monkeypatch.setattr(handler, "fetch_yields", dependencies["fetch"])
@@ -184,3 +184,56 @@ def test_history_only_reads_after_auth(deps):
 def test_basis_point_spread_uses_exact_decimal_arithmetic():
     answer = handler.answer_from_evidence(EVIDENCE, ["2y", "10y"])
     assert "+80 basis points" in answer
+
+
+def test_historical_question_uses_requested_date_and_persists_provenance(deps):
+    deps["plan"].return_value = {"action": "lookup", "maturities": ["10y"], "dates": ["2025-10-23"]}
+    evidence = {"as_of": "2025-10-23", "requested_date": "2025-10-23", "rates": {"10y": "4.01"},
+                "source_url": "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/TextView?type=daily_treasury_yield_curve&field_tdr_date_value_month=202510",
+                "data_url": "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/pages/xml?data=daily_treasury_yield_curve&field_tdr_date_value_month=202510"}
+    deps["fetch"].return_value = evidence
+    result = handler.lambda_handler(event(question="What was the 10 year rate on October 23rd, 2025?"), None)
+    body = json.loads(result["body"])
+    assert result["statusCode"] == 200 and body["status"] == "answered"
+    assert "2025-10-23" in body["answer"] and "4.01%" in body["answer"]
+    deps["fetch"].assert_called_once_with(["10y"], dates=["2025-10-23"])
+    assert deps["finish_history"].call_args.args[1]["evidence"] == evidence
+    assert body["policy_version"] == "treasury-dates-v2"
+
+
+@pytest.mark.parametrize("reverse,expected", [(False, "+99"), (True, "-99")])
+def test_temporal_comparison_uses_requested_order_and_exact_basis_points(reverse, expected):
+    old = {"as_of": "2025-10-23", "rates": {"10y": "4.01"}, "source_url": "https://home.treasury.gov/2025"}
+    new = {"as_of": "2026-10-23", "rates": {"10y": "5.00"}, "source_url": "https://home.treasury.gov/2026"}
+    rows = [new, old] if reverse else [old, new]
+    answer = handler.answer_from_evidence({"observations": rows}, ["10y"])
+    assert f"{expected} basis points" in answer
+    assert f"From {rows[0]['as_of']} to {rows[1]['as_of']}" in answer
+    assert "Sources: " + " | ".join(row["source_url"] for row in rows) in answer
+
+
+def test_two_maturities_on_two_dates_report_each_spread_and_change():
+    rows = [{"as_of": "2025-10-23", "rates": {"2y": "3.48", "10y": "4.01"}, "source_url": "https://home.treasury.gov/2025"},
+            {"as_of": "2026-10-23", "rates": {"2y": "4.69", "10y": "5.00"}, "source_url": "https://home.treasury.gov/2026"}]
+    answer = handler.answer_from_evidence({"observations": rows}, ["2y", "10y"])
+    assert "+53 basis points" in answer and "+31 basis points" in answer
+    assert "2-year yield changed by +121 basis points" in answer
+    assert "10-year yield changed by +99 basis points" in answer
+
+
+def test_unpublished_date_is_an_audited_domain_answer_not_an_outage(deps):
+    deps["plan"].return_value = {"action": "lookup", "maturities": ["10y"], "dates": ["2025-10-25"]}
+    deps["fetch"].side_effect = RatesNotPublished("Treasury did not publish an observation for 2025-10-25.")
+    result = handler.lambda_handler(event(question="What was the 10-year yield on October 25, 2025?"), None)
+    body = json.loads(result["body"])
+    assert result["statusCode"] == 200 and body["status"] == "no_data"
+    assert "2025-10-25" in body["answer"] and "choose another date" in body["answer"]
+    assert "evidence" not in body and "5.00%" not in body["answer"]
+    deps["fetch"].assert_called_once()
+    assert deps["finish_history"].call_args.args[1]["status"] == "no_data"
+
+
+def test_unpublished_result_requires_durable_history_too(deps):
+    deps["fetch"].side_effect = RatesNotPublished("No published observation.")
+    deps["finish_history"].side_effect = RuntimeError("history unavailable")
+    assert handler.lambda_handler(event(), None)["statusCode"] == 503

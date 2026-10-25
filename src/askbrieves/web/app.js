@@ -29,7 +29,15 @@
     if (typeof raw !== "string") return null;
     try {
       const url = new URL(raw);
-      if (url.protocol === "https:" && url.hostname === "home.treasury.gov" && !url.username && !url.password && !url.port && url.pathname.startsWith("/resource-center/data-chart-center/interest-rates/")) return url.href;
+      if (url.protocol === "https:" && url.hostname === "home.treasury.gov" && !url.username && !url.password && !url.port && url.pathname.startsWith("/resource-center/data-chart-center/interest-rates/")) {
+        // Older saved answers cite the XML feed. Open the readable table instead.
+        if (url.pathname.endsWith("/pages/xml") && url.searchParams.get("data") === "daily_treasury_yield_curve") {
+          const month = url.searchParams.get("field_tdr_date_value_month");
+          if (!/^\d{6}$/.test(month || "")) return null;
+          return `https://home.treasury.gov/resource-center/data-chart-center/interest-rates/TextView?type=daily_treasury_yield_curve&field_tdr_date_value_month=${month}`;
+        }
+        return url.href;
+      }
     } catch (_) { return null; }
     return null;
   }
@@ -42,13 +50,19 @@
     label.className = "message-label";
     label.textContent = role === "user" ? "YOU" : "BRIEVES";
     const body = document.createElement("p");
-    const source = safeSource(details.evidence && details.evidence.source_url);
+    const evidence = details.evidence;
+    const observations = evidence && Array.isArray(evidence.observations) ? evidence.observations.slice(0, 2) : evidence ? [evidence] : [];
+    const sourceUrls = [...new Set(observations.filter((item) => item && safeSource(item.source_url)).map((item) => item.source_url))];
     let content = typeof text === "string" ? text : "No answer available.";
-    if (source && content.endsWith(`Source: ${details.evidence.source_url}`)) content = content.slice(0, -(`Source: ${details.evidence.source_url}`).length).trim();
+    const citation = (sourceUrls.length === 1 ? "Source: " : "Sources: ") + sourceUrls.join(" | ");
+    if (sourceUrls.length && content.endsWith(citation)) content = content.slice(0, -citation.length).trim();
     body.textContent = content;
     article.append(label, body);
-    const asOf = details.evidence && details.evidence.as_of;
-    if (source || (typeof asOf === "string" && /^\d{4}-\d{2}-\d{2}$/.test(asOf))) {
+    for (const observation of observations) {
+      if (!observation || typeof observation !== "object") continue;
+      const source = safeSource(observation.source_url);
+      const asOf = observation.as_of;
+      if (!source && !(typeof asOf === "string" && /^\d{4}-\d{2}-\d{2}$/.test(asOf))) continue;
       const meta = document.createElement("div");
       meta.className = "message-meta";
       if (typeof asOf === "string" && /^\d{4}-\d{2}-\d{2}$/.test(asOf)) {
@@ -59,7 +73,7 @@
       if (source) {
         const link = document.createElement("a");
         link.href = source;
-        link.textContent = "Treasury source ↗";
+        link.textContent = observations.length === 1 ? "Treasury source ↗" : `Treasury source · ${asOf} ↗`;
         link.target = "_blank";
         link.rel = "noopener noreferrer";
         meta.append(link);

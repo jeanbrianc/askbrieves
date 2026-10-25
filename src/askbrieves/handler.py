@@ -14,12 +14,11 @@ from decimal import Decimal
 
 from askbrieves import storage
 from askbrieves.planner import POLICY_VERSION, PlannerUnavailable, plan_question
-from askbrieves.rates import RatesUnavailable, fetch_yields
+from askbrieves.rates import RatesNotPublished, RatesUnavailable, fetch_yields
 
-DECLINED = ("I can report the latest published U.S. Treasury par yield for one or two maturities "
-            "(1, 2, 3, 4, 6 months; 1, 2, 3, 5, 7, 10, 20, 30 years). "
-            "Please ask a specific Treasury yield question. I cannot provide advice, forecasts, "
-            "historical rates, other rate products, or unrelated answers.")
+DECLINED = ("I can help with current or historical U.S. Treasury yields. "
+            "Include a maturity and a full date, or say latest. "
+            "I cannot provide forecasts, investment advice, secrets, or unrelated answers.")
 SECRET_PATTERN = re.compile(r"\b(?:sk-[A-Za-z0-9_-]{16,}|(?:AKIA|ASIA)[A-Z0-9]{16})\b")
 PUBLIC_ASSETS = {"/": ("index.html", "text/html; charset=utf-8"),
                  "/app.js": ("app.js", "text/javascript; charset=utf-8"),
@@ -70,13 +69,26 @@ def read_question(event):
 
 
 def answer_from_evidence(evidence, maturities):
+    observations = evidence.get("observations", [evidence])
     labels = [f"{m[:-1]}-{'month' if m.endswith('m') else 'year'}" for m in maturities]
-    clauses = [f"the {label} yield was {evidence['rates'][m]}%" for m, label in zip(maturities, labels)]
-    answer = f"As of {evidence['as_of']}, " + " and ".join(clauses) + "."
-    if len(maturities) == 2:
-        difference = (Decimal(evidence["rates"][maturities[1]]) - Decimal(evidence["rates"][maturities[0]])) * 100
-        answer += f" The {labels[1]} minus {labels[0]} spread was {difference:+.0f} basis points."
-    return answer + " These are daily U.S. Treasury par yields, not live quotes or deposit APYs. Source: " + evidence["source_url"]
+    paragraphs = []
+    for observation in observations:
+        clauses = [f"the {label} yield was {observation['rates'][m]}%" for m, label in zip(maturities, labels)]
+        paragraph = f"As of {observation['as_of']}, " + " and ".join(clauses) + "."
+        if len(maturities) == 2:
+            spread = (Decimal(observation["rates"][maturities[1]]) - Decimal(observation["rates"][maturities[0]])) * 100
+            paragraph += f" The {labels[1]} minus {labels[0]} spread was {spread:+.0f} basis points."
+        paragraphs.append(paragraph)
+    if len(observations) == 2:
+        first, second = observations
+        changes = []
+        for maturity, label in zip(maturities, labels):
+            change = (Decimal(second["rates"][maturity]) - Decimal(first["rates"][maturity])) * 100
+            changes.append(f"the {label} yield changed by {change:+.0f} basis points")
+        paragraphs.append(f"From {first['as_of']} to {second['as_of']}, " + " and ".join(changes) + ".")
+    sources = list(dict.fromkeys(observation["source_url"] for observation in observations))
+    citation = ("Source: " if len(sources) == 1 else "Sources: ") + " | ".join(sources)
+    return " ".join(paragraphs) + " These are daily U.S. Treasury par yields, not live quotes or deposit APYs. " + citation
 
 
 def process_question(question, request_id, now):
@@ -87,12 +99,15 @@ def process_question(question, request_id, now):
         if plan["action"] == "decline":
             result = {"status": "declined", "answer": DECLINED, "reason": plan["reason"]}
         else:
-            evidence = fetch_yields(plan["maturities"])
+            evidence = fetch_yields(plan["maturities"], dates=plan["dates"])
             result = {"status": "answered", "answer": answer_from_evidence(evidence, plan["maturities"]),
                       "evidence": evidence}
         code = 200
+    except RatesNotPublished as exc:
+        result = {"status": "no_data", "answer": str(exc) + " Please choose another date or maturity."}
+        code = 200
     except (PlannerUnavailable, RatesUnavailable):
-        result = {"status": "unavailable", "answer": "I could not verify a current rate safely. Please retry later."}
+        result = {"status": "unavailable", "answer": "I could not verify the requested Treasury data safely. Please retry later."}
         code = 503
     result["policy_version"] = POLICY_VERSION
     # A successful API response requires a durable history record. Failure propagates.

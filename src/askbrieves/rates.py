@@ -13,13 +13,24 @@ from zoneinfo import ZoneInfo
 
 
 class RatesUnavailable(Exception):
-    """No sufficiently fresh, valid Treasury observation can be returned."""
+    """A valid Treasury observation could not safely be retrieved."""
+
+
+class RatesNotPublished(RatesUnavailable):
+    """The feed has no published observation for the requested date or tenor."""
 
 
 FEED_BASE = (
     "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/pages/xml"
     "?data=daily_treasury_yield_curve&field_tdr_date_value_month="
 )
+SOURCE_BASE = (
+    "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/TextView"
+    "?type=daily_treasury_yield_curve&field_tdr_date_value_month="
+)
+EARLIEST_DATE = date(1990, 1, 2)
+DESCRIPTION = "U.S. Treasury daily par yields"
+MAX_MONTHLY_DOWNLOADS = 3
 MAX_RESPONSE_BYTES = 1_048_576
 NS = {
     "a": "http://www.w3.org/2005/Atom",
@@ -98,7 +109,7 @@ def _observations(body: bytes) -> list[tuple[date, ElementTree.Element]]:
 def _yield_value(properties: ElementTree.Element, maturity: str) -> str:
     field = properties.find(f"d:{MATURITY_FIELDS[maturity]}", NS)
     if field is None or field.get(f"{{{NS['m']}}}null") == "true":
-        raise RatesUnavailable("The requested Treasury yield is unavailable.")
+        raise RatesNotPublished("The requested Treasury yield is not published.")
     try:
         if not re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", field.text or ""):
             raise InvalidOperation
@@ -110,43 +121,112 @@ def _yield_value(properties: ElementTree.Element, maturity: str) -> str:
         raise RatesUnavailable("Treasury returned an invalid yield.") from exc
 
 
-def fetch_yields(maturities: list[str], today: date | None = None) -> dict:
-    """Return one latest dated observation, or fail closed.
-
-    Current-month absence alone permits a previous-month lookup. A missing tenor
-    on the latest row never causes silent fallback to an older observation.
-    MAX_DATA_AGE_DAYS defaults to seven calendar days and accepts 0 through 30.
-    """
+def _requested_dates(dates: list[str] | None, today: date) -> list[str]:
+    dates = ["latest"] if dates is None else dates
     if (
-        not isinstance(maturities, list)
-        or not maturities
-        or len(maturities) > len(MATURITY_FIELDS)
-        or any(not isinstance(m, str) or m not in MATURITY_FIELDS for m in maturities)
+        not isinstance(dates, list)
+        or not 1 <= len(dates) <= 2
+        or any(not isinstance(value, str) for value in dates)
+        or len(set(dates)) != len(dates)
     ):
-        raise RatesUnavailable("Unsupported Treasury maturity.")
+        raise RatesUnavailable("Request one or two distinct Treasury dates.")
+    for value in dates:
+        if value == "latest":
+            continue
+        if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value):
+            raise RatesUnavailable("Treasury dates must use YYYY-MM-DD.")
+        try:
+            requested = date.fromisoformat(value)
+        except ValueError as exc:
+            raise RatesUnavailable("Invalid Treasury date.") from exc
+        if not EARLIEST_DATE <= requested <= today:
+            raise RatesUnavailable("Treasury dates must be between 1990-01-02 and today.")
+    return dates
+
+
+def _freshness_days() -> int:
     try:
         max_age = int(os.environ.get("MAX_DATA_AGE_DAYS", "7"))
         if not 0 <= max_age <= 30:
             raise ValueError
+        return max_age
     except ValueError as exc:
         raise RatesUnavailable("Invalid data freshness configuration.") from exc
 
+
+def fetch_yields(
+    maturities: list[str], today: date | None = None, dates: list[str] | None = None
+) -> dict:
+    """Retrieve up to two maturities on up to two explicitly selected dates.
+
+    ``latest`` uses the newest current-month observation (previous month only
+    when current month is empty) and the configured freshness limit. Historical
+    dates require an exact published observation and are never shifted to a
+    nearby day. Each source month is downloaded at most once per request.
+    """
+    if (
+        not isinstance(maturities, list)
+        or not 1 <= len(maturities) <= 2
+        or any(not isinstance(m, str) or m not in MATURITY_FIELDS for m in maturities)
+        or len(set(maturities)) != len(maturities)
+    ):
+        raise RatesUnavailable("Request one or two distinct supported Treasury maturities.")
     today = today or datetime.now(ZoneInfo("America/New_York")).date()
-    month = today.replace(day=1)
-    previous_month = month - timedelta(days=1)
-    for period in (month, previous_month):
-        source_url = f"{FEED_BASE}{period:%Y%m}"
-        observations = _observations(_download(source_url))
-        if not observations:
-            continue
-        as_of, properties = max(observations, key=lambda row: row[0])
-        age = (today - as_of).days
-        if age < 0 or age > max_age:
-            raise RatesUnavailable("Treasury observation is stale or future-dated.")
-        return {
+    requested_dates = _requested_dates(dates, today)
+    max_age = _freshness_days() if "latest" in requested_dates else None
+    month_cache: dict[str, list[tuple[date, ElementTree.Element]]] = {}
+
+    def load_month(period: date) -> tuple[str, list[tuple[date, ElementTree.Element]]]:
+        month_key = period.strftime("%Y%m")
+        if month_key not in month_cache:
+            if len(month_cache) >= MAX_MONTHLY_DOWNLOADS:
+                raise RatesUnavailable("Treasury lookup exceeded its request limit.")
+            observations = _observations(_download(f"{FEED_BASE}{month_key}"))
+            seen = set()
+            for as_of, _ in observations:
+                if as_of.strftime("%Y%m") != month_key or as_of in seen:
+                    raise RatesUnavailable("Treasury returned inconsistent observation dates.")
+                seen.add(as_of)
+            month_cache[month_key] = observations
+        return month_key, month_cache[month_key]
+
+    results = []
+    for requested_date in requested_dates:
+        if requested_date == "latest":
+            month = today.replace(day=1)
+            month_key, observations = load_month(month)
+            if not observations:
+                month_key, observations = load_month(month - timedelta(days=1))
+            if not observations:
+                raise RatesUnavailable("Treasury has no recent observations.")
+            as_of, properties = max(observations, key=lambda row: row[0])
+            age = (today - as_of).days
+            if age < 0 or age > max_age:
+                raise RatesUnavailable("Treasury observation is stale or future-dated.")
+        else:
+            requested = date.fromisoformat(requested_date)
+            month_key, observations = load_month(requested)
+            matching = [(as_of, row) for as_of, row in observations if as_of == requested]
+            if not matching:
+                raise RatesNotPublished(
+                    f"Treasury did not publish a daily par yield observation for {requested_date}."
+                )
+            as_of, properties = matching[0]
+
+        try:
+            values = {maturity: _yield_value(properties, maturity) for maturity in maturities}
+        except RatesNotPublished as exc:
+            labels = [f"{m[:-1]}-{'month' if m.endswith('m') else 'year'}" for m in maturities]
+            raise RatesNotPublished(
+                f"Treasury did not publish all requested yields ({', '.join(labels)}) "
+                f"for {as_of.isoformat()}."
+            ) from exc
+        results.append({
             "as_of": as_of.isoformat(),
-            "rates": {maturity: _yield_value(properties, maturity) for maturity in maturities},
-            "source_url": source_url,
-            "description": "U.S. Treasury daily par yields",
-        }
-    raise RatesUnavailable("Treasury has no recent observations.")
+            "requested_date": requested_date,
+            "rates": values,
+            "source_url": f"{SOURCE_BASE}{month_key}",
+            "data_url": f"{FEED_BASE}{month_key}",
+            "description": DESCRIPTION,
+        })
+    return results[0] if len(results) == 1 else {"observations": results, "description": DESCRIPTION}
