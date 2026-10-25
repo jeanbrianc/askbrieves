@@ -2,7 +2,7 @@
 
 A small agentic service that answers questions about **latest and dated U.S. Treasury par yields**. Built for the ModernFi platform engineering take-home, with the emphasis on bounded behavior, repeatable deployment, and clear operational tradeoffs.
 
-Open the chat at **https://askbrieves.brianjeanbuilds.com**. The page, its assets, and `GET /health` are public; questions and history require the demo bearer token. See the [historical release proof](docs/verification-historical.md) and [initial deployment evidence](docs/verification.md).
+Open the chat at **https://askbrieves.brianjeanbuilds.com**. The page, its assets, and `GET /health` are public; questions and history require the demo bearer token. See the [reviewer access verification](docs/verification-reviewer.md), [historical release proof](docs/verification-historical.md), and [initial deployment evidence](docs/verification.md).
 
 ## Try it
 
@@ -61,7 +61,7 @@ Each question is sent to the OpenAI Responses API using the server-side project 
 
 **DynamoDB:** the access patterns are append/update a request, list recent history, and increment an atomic daily counter. There are no joins or business transactions requiring PostgreSQL. On-demand billing avoids capacity tuning for an interview demo. The table is encrypted, has point-in-time recovery, and is retained when the stack is deleted.
 
-**Plain CloudFormation:** explicit, reviewable AWS resources without another IaC state service or framework dependency. Pulumi would be reasonable in an existing Pulumi estate; this isolated service does not need a new toolchain. A separate bootstrap stack owns private artifact storage, and immutable SHA-256 package keys make rollback straightforward. Deployment is a human-invoked action; CI validates but has no AWS credentials or deployment permission.
+**Plain CloudFormation:** explicit, reviewable AWS resources without another IaC state service or framework dependency. Pulumi would be reasonable in an existing Pulumi estate; this isolated service does not need a new toolchain. A separate bootstrap stack owns private artifact storage, and SHA-256-addressed package keys make rollback straightforward; bucket versioning does not make those keys write-once. Deployment is a human-invoked action; CI validates but has no AWS credentials or deployment permission.
 
 **Treasury directly:** an authoritative public source with no extra data-provider key. These are nominal daily par constant-maturity yields, not intraday executable quotes, a bond price, or deposit APY. [Treasury feed documentation](https://home.treasury.gov/treasury-daily-interest-rate-xml-feed) and [methodology](https://home.treasury.gov/policy-issues/financing-the-government/interest-rate-statistics/interest-rates-frequently-asked-questions).
 
@@ -96,7 +96,7 @@ AWS_PROFILE=your-profile bash scripts/deploy.sh us-east-1 \
   'YOUR_HOSTED_ZONE_ID' askbrieves.your-domain.com
 ```
 
-The script tests/lints, packages, deploys `askbrieves-artifacts`, uploads an immutable artifact, then deploys `askbrieves` with `CAPABILITY_IAM`. Review the templates and CloudFormation change set when adapting this to another account. ACM creates its DNS validation record in the supplied zone. The custom domain has TLS 1.2 minimum and IPv4/IPv6 aliases; the default execute-api endpoint is disabled. For a disposable alternate stack, set `ASKBRIEVES_STACK=askbrieves-test` and use another domain.
+The script tests/lints, packages, deploys `askbrieves-artifacts`, uploads a SHA-256-addressed artifact, then deploys `askbrieves` with `CAPABILITY_IAM`. Review the templates and CloudFormation change set when adapting this to another account. ACM creates its DNS validation record in the supplied zone. The custom domain has TLS 1.2 minimum and IPv4/IPv6 aliases; the default execute-api endpoint is disabled. For a disposable alternate stack, set `ASKBRIEVES_STACK=askbrieves-test` and use another domain.
 
 The default `ReservedConcurrency=-1` omits a Lambda reservation and shares existing account capacity. The script does not request a quota increase. An optional positive `ASKBRIEVES_RESERVED_CONCURRENCY` setting reserves and limits function capacity when the regional account has enough available; the API throttle and daily request cap apply in either mode.
 
