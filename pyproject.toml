@@ -1,0 +1,9 @@
+[project]
+name = "askbrieves"
+version = "0.1.0"
+description = "A constrained US Treasury yield question service"
+requires-python = ">=3.13"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
