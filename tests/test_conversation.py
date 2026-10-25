@@ -145,3 +145,20 @@ def test_bad_context_rejected_before_quota(deps, context_id):
     request['body'] = json.dumps({'question':'next day?', 'context_id':context_id})
     assert handler.lambda_handler(request, None)['statusCode'] == 400
     deps['claim_request'].assert_not_called()
+
+
+@pytest.mark.parametrize('today,text,expected', [
+    (date(2026,10,25),'peak last october','2025-10'),
+    (date(2026,11,1),'peak last October','2026-10'),
+    (date(2026,1,1),'peak last month','2025-12'),
+    (date(2026,10,25),'peak this month','2026-10'),
+    (date(2026,10,25),'last October versus this month',None),
+])
+def test_relative_month_calendar_resolution(today, text, expected):
+    assert planner.relative_month(text, today) == expected
+
+
+def test_monthly_peak_cannot_drift_from_last_named_month(monkeypatch):
+    mock_provider(monkeypatch, decision('monthly_peak_treasury_yield', {'maturity':'10y','month':'2026-09'}))
+    result = planner.plan_question('What was the peak 10 year treasury yield last october', 'test', today=TODAY)
+    assert result == {'action':'peak','maturity':'10y','month':'2025-10'}
