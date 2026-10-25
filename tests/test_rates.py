@@ -42,14 +42,19 @@ class TreasuryRatesTests(unittest.TestCase):
             result = rates.fetch_yields(["10y"], today=date(2026, 10, 25))
         self.assertEqual(result["as_of"], "2026-10-23")
         self.assertEqual(result["rates"], {"10y": "5.00"})
-        self.assertEqual(result["source_url"], f"{rates.FEED_BASE}202610")
+        self.assertEqual(result["source_url"], f"{rates.SOURCE_BASE}202610")
+        self.assertEqual(result["data_url"], f"{rates.FEED_BASE}202610")
+        self.assertEqual(result["requested_date"], "latest")
         self.assertEqual(result["description"], "U.S. Treasury daily par yields")
 
     def test_all_supported_maturities_map_to_verified_treasury_fields(self):
         fields = {field: "4.1" for field in rates.MATURITY_FIELDS.values()}
-        with patch.object(rates, "_download", return_value=xml_feed(("2026-10-23", fields))):
-            result = rates.fetch_yields(list(rates.MATURITY_FIELDS), date(2026, 10, 23))
-        self.assertEqual(result["rates"], {m: "4.10" for m in rates.MATURITY_FIELDS})
+        for maturity in rates.MATURITY_FIELDS:
+            with self.subTest(maturity=maturity), patch.object(
+                rates, "_download", return_value=xml_feed(("2026-10-23", fields))
+            ):
+                result = rates.fetch_yields([maturity], date(2026, 10, 23))
+            self.assertEqual(result["rates"], {maturity: "4.10"})
 
     def test_year_rollover_uses_previous_december_when_january_is_empty(self):
         with patch.object(
@@ -57,7 +62,8 @@ class TreasuryRatesTests(unittest.TestCase):
         ) as download:
             result = rates.fetch_yields(["10y"], date(2026, 1, 1))
         self.assertEqual(result["as_of"], "2025-12-31")
-        self.assertEqual(result["source_url"], f"{rates.FEED_BASE}202512")
+        self.assertEqual(result["source_url"], f"{rates.SOURCE_BASE}202512")
+        self.assertEqual(result["data_url"], f"{rates.FEED_BASE}202512")
         self.assertEqual([c.args[0] for c in download.call_args_list], [f"{rates.FEED_BASE}202601", f"{rates.FEED_BASE}202512"])
 
     def test_missing_latest_tenor_never_backfills_older_row(self):
@@ -115,7 +121,7 @@ class TreasuryRatesTests(unittest.TestCase):
 
     def test_unsupported_maturities_never_trigger_network(self):
         with patch.object(rates, "_download") as download:
-            for maturities in ([], ["15y"], ["https://evil.invalid"], "10y", [None], ["10y"] * 14):
+            for maturities in ([], ["15y"], ["https://evil.invalid"], "10y", [None], ["10y", "10y"], ["1y", "2y", "10y"]):
                 with self.subTest(maturities=maturities), self.assertRaises(rates.RatesUnavailable):
                     rates.fetch_yields(maturities, date(2026, 10, 25))
             download.assert_not_called()
@@ -177,6 +183,158 @@ class TreasuryRatesTests(unittest.TestCase):
     def test_redirect_handler_does_not_follow_external_or_internal_urls(self):
         for url in ("https://evil.invalid", "https://home.treasury.gov/another"):
             self.assertIsNone(rates._NoRedirect().redirect_request(None, None, 302, "Found", {}, url))
+
+    def test_historical_exact_date_is_returned_without_latest_freshness_limit(self):
+        feed = xml_feed(
+            ("2025-10-23", {"BC_10YEAR": "4.01", "BC_2YEAR": "3.48"}),
+            ("2025-10-24", {"BC_10YEAR": "4.02", "BC_2YEAR": "3.48"}),
+        )
+        with patch.object(rates, "_download", return_value=feed) as download:
+            result = rates.fetch_yields(["10y", "2y"], date(2026, 10, 25), dates=["2025-10-23"])
+        self.assertEqual(result["as_of"], "2025-10-23")
+        self.assertEqual(result["requested_date"], "2025-10-23")
+        self.assertEqual(result["rates"], {"10y": "4.01", "2y": "3.48"})
+        self.assertEqual(result["source_url"], f"{rates.SOURCE_BASE}202510")
+        self.assertEqual(result["data_url"], f"{rates.FEED_BASE}202510")
+        download.assert_called_once_with(f"{rates.FEED_BASE}202510")
+
+    def test_historical_only_is_independent_of_invalid_freshness_configuration(self):
+        with patch.dict(os.environ, {"MAX_DATA_AGE_DAYS": "invalid"}), patch.object(
+            rates, "_download", return_value=xml_feed(("2025-10-23", {"BC_10YEAR": "4.01"}))
+        ):
+            result = rates.fetch_yields(["10y"], date(2026, 10, 25), dates=["2025-10-23"])
+        self.assertEqual(result["rates"], {"10y": "4.01"})
+
+    def test_historical_single_maturity_works(self):
+        with patch.object(rates, "_download", return_value=xml_feed(("2025-10-23", {"BC_10YEAR": "4.01"}))):
+            result = rates.fetch_yields(["10y"], date(2026, 10, 25), ["2025-10-23"])
+        self.assertEqual(result["rates"], {"10y": "4.01"})
+
+    def test_two_historical_dates_preserve_request_order_and_reuse_month(self):
+        feed = xml_feed(
+            ("2025-10-23", {"BC_10YEAR": "4.01"}),
+            ("2025-10-24", {"BC_10YEAR": "4.02"}),
+        )
+        with patch.object(rates, "_download", return_value=feed) as download:
+            result = rates.fetch_yields(["10y"], date(2026, 10, 25), ["2025-10-24", "2025-10-23"])
+        self.assertEqual([row["requested_date"] for row in result["observations"]], ["2025-10-24", "2025-10-23"])
+        self.assertEqual([row["rates"]["10y"] for row in result["observations"]], ["4.02", "4.01"])
+        self.assertEqual(result["description"], rates.DESCRIPTION)
+        download.assert_called_once_with(f"{rates.FEED_BASE}202510")
+
+    def test_historical_and_latest_dates_preserve_order(self):
+        with patch.object(rates, "_download", side_effect=[
+            xml_feed(("2025-10-23", {"BC_10YEAR": "4.01"})),
+            xml_feed(("2026-10-23", {"BC_10YEAR": "5.00"})),
+        ]) as download:
+            result = rates.fetch_yields(["10y"], date(2026, 10, 25), ["2025-10-23", "latest"])
+        self.assertEqual([row["as_of"] for row in result["observations"]], ["2025-10-23", "2026-10-23"])
+        self.assertEqual([row["requested_date"] for row in result["observations"]], ["2025-10-23", "latest"])
+        self.assertEqual(download.call_count, 2)
+
+    def test_latest_and_historical_same_month_use_one_download(self):
+        feed = xml_feed(
+            ("2026-10-22", {"BC_10YEAR": "4.96"}),
+            ("2026-10-23", {"BC_10YEAR": "5.00"}),
+        )
+        with patch.object(rates, "_download", return_value=feed) as download:
+            result = rates.fetch_yields(["10y"], date(2026, 10, 25), ["latest", "2026-10-22"])
+        self.assertEqual([row["as_of"] for row in result["observations"]], ["2026-10-23", "2026-10-22"])
+        self.assertEqual(download.call_count, 1)
+
+    def test_latest_fallback_and_historical_need_at_most_three_month_downloads(self):
+        with patch.object(rates, "_download", side_effect=[
+            xml_feed(),
+            xml_feed(("2025-12-31", {"BC_10YEAR": "4.2"})),
+            xml_feed(("2025-10-23", {"BC_10YEAR": "4.01"})),
+        ]) as download:
+            result = rates.fetch_yields(["10y"], date(2026, 1, 1), ["latest", "2025-10-23"])
+        self.assertEqual([row["as_of"] for row in result["observations"]], ["2025-12-31", "2025-10-23"])
+        self.assertEqual(download.call_count, 3)
+        self.assertEqual([c.args[0] for c in download.call_args_list], [
+            f"{rates.FEED_BASE}202601", f"{rates.FEED_BASE}202512", f"{rates.FEED_BASE}202510"
+        ])
+
+    def test_weekend_never_substitutes_a_nearby_date(self):
+        feed = xml_feed(
+            ("2025-10-24", {"BC_10YEAR": "4.02"}),
+            ("2025-10-27", {"BC_10YEAR": "4.01"}),
+        )
+        with patch.object(rates, "_download", return_value=feed) as download:
+            with self.assertRaises(rates.RatesNotPublished) as raised:
+                rates.fetch_yields(["10y"], date(2026, 10, 25), ["2025-10-25"])
+        self.assertIn("2025-10-25", str(raised.exception))
+        self.assertEqual(download.call_count, 1)
+
+    def test_empty_historical_month_is_not_published_without_fallback(self):
+        with patch.object(rates, "_download", return_value=xml_feed()) as download:
+            with self.assertRaises(rates.RatesNotPublished):
+                rates.fetch_yields(["10y"], date(2026, 10, 25), ["2025-10-25"])
+        download.assert_called_once_with(f"{rates.FEED_BASE}202510")
+
+    def test_maturity_not_yet_published_is_an_understandable_no_data_result(self):
+        for fields in ({"BC_10YEAR": "3.20"}, {"BC_10YEAR": "3.20", "BC_4MONTH": None}):
+            with self.subTest(fields=fields), patch.object(
+                rates, "_download", return_value=xml_feed(("2018-10-23", fields))
+            ):
+                with self.assertRaises(rates.RatesNotPublished) as raised:
+                    rates.fetch_yields(["10y", "4m"], date(2026, 10, 25), ["2018-10-23"])
+            self.assertIn("2018-10-23", str(raised.exception))
+            self.assertIn("4-month", str(raised.exception))
+
+    def test_missing_historical_tenor_never_uses_another_row(self):
+        feed = xml_feed(
+            ("2025-10-23", {"BC_2YEAR": "3.48"}),
+            ("2025-10-24", {"BC_2YEAR": "3.48", "BC_10YEAR": "4.02"}),
+        )
+        with patch.object(rates, "_download", return_value=feed):
+            with self.assertRaises(rates.RatesNotPublished):
+                rates.fetch_yields(["10y"], date(2026, 10, 25), ["2025-10-23"])
+
+    def test_invalid_dates_are_rejected_before_any_network_request(self):
+        requests = (
+            [], "2025-10-23", [None], ["2025-10-23", "2025-10-23"],
+            ["latest", "latest"], ["latest", "2025-10-23", "2025-10-24"],
+            ["20251023"], ["2025-1-23"], ["2025-W43-4"], ["2025-02-30"],
+            ["2025-10-23T00:00:00"], ["https://evil.invalid"], ["Latest"],
+            ["1989-12-31"], ["1990-01-01"], ["2026-10-26"],
+        )
+        with patch.object(rates, "_download") as download:
+            for requested in requests:
+                with self.subTest(requested=requested), self.assertRaises(rates.RatesUnavailable):
+                    rates.fetch_yields(["10y"], date(2026, 10, 25), requested)
+        download.assert_not_called()
+
+    def test_archive_start_date_is_supported(self):
+        with patch.object(rates, "_download", return_value=xml_feed(("1990-01-02", {"BC_10YEAR": "7.94"}))):
+            result = rates.fetch_yields(["10y"], date(2026, 10, 25), ["1990-01-02"])
+        self.assertEqual(result["as_of"], "1990-01-02")
+
+    def test_mixed_request_still_rejects_stale_latest(self):
+        with patch.object(rates, "_download", side_effect=[
+            xml_feed(("2025-10-23", {"BC_10YEAR": "4.01"})),
+            xml_feed(("2026-10-16", {"BC_10YEAR": "5.00"})),
+        ]):
+            with self.assertRaises(rates.RatesUnavailable) as raised:
+                rates.fetch_yields(["10y"], date(2026, 10, 25), ["2025-10-23", "latest"])
+        self.assertNotIsInstance(raised.exception, rates.RatesNotPublished)
+
+    def test_invalid_historical_value_is_an_upstream_failure_not_nonpublication(self):
+        with patch.object(rates, "_download", return_value=xml_feed(("2025-10-23", {"BC_10YEAR": "NaN"}))):
+            with self.assertRaises(rates.RatesUnavailable) as raised:
+                rates.fetch_yields(["10y"], date(2026, 10, 25), ["2025-10-23"])
+        self.assertNotIsInstance(raised.exception, rates.RatesNotPublished)
+
+    def test_duplicate_or_wrong_month_source_dates_are_upstream_failures(self):
+        feeds = (
+            xml_feed(("2025-11-23", {"BC_10YEAR": "4.01"})),
+            xml_feed(("2025-10-23", {"BC_10YEAR": "4.01"}), ("2025-10-23", {"BC_10YEAR": "4.02"})),
+        )
+        for feed in feeds:
+            with self.subTest(feed=feed), patch.object(rates, "_download", return_value=feed):
+                with self.assertRaises(rates.RatesUnavailable) as raised:
+                    rates.fetch_yields(["10y"], date(2026, 10, 25), ["2025-10-23"])
+            self.assertNotIsInstance(raised.exception, rates.RatesNotPublished)
 
 
 if __name__ == "__main__":

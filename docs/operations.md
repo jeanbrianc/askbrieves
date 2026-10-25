@@ -2,9 +2,9 @@
 
 ## Ownership and signals
 
-The demo has one owner and one shared bearer credential. `GET /health` is **liveness only**: it confirms code is responding, not that OpenAI, Treasury, or history is available. `scripts/smoke.py` exercises the authenticated end-to-end path, refusals, and persisted history using a few requests from the daily quota.
+The demo has an owner credential and an optional expiring reviewer credential. Histories use separate fixed partitions; a reviewer cannot request the owner's partition. People sharing the reviewer credential share that audience's history. `GET /health` is liveness only, not a dependency check. Every accepted question, including explanations and refusals, consumes one global daily attempt.
 
-The public `/` page is a small chat interface; `/app.js`, `/styles.css`, and the supplied `/brand.png` are public assets served through the same Lambda. Access opens a compact token dialog. Enter the demo bearer token, never the OpenAI API key. The token stays in memory, without browser storage or cookies. Questions and the shared read-only history still require API authentication. The Content Security Policy permits only same-origin assets and connections. The CLI remains available.
+The public `/` page and assets are served by the same Lambda. Access accepts a demo bearer token, never the OpenAI key. Tokens remain in memory, without browser storage or cookies. Questions and audience-scoped history require authentication. The CSP permits same-origin assets and connections; educational source links use official Treasury, Federal Reserve, New York Fed, and SEC hosts. The quiet footer links to GitHub. No question-supplied URLs are fetched.
 
 CloudFormation outputs `FunctionName`, `FunctionLogGroup`, `ApiLogGroup`, and `HistoryTable`. Application logs emit request ID, status, outcome, and duration; the same request ID is returned in the response/header. Access logs contain gateway request ID, route, status, and latency. Use these IDs for correlation without printing questions or credentials. Three alarms cover API 5xx, unhandled Lambda errors, and Lambda throttles. **No alarm notification/paging destination is configured**; alarms must be inspected in CloudWatch until an owner adds one. Handled dependency failures appear in API 5xx, even when Lambda's invocation succeeded.
 
@@ -22,10 +22,13 @@ The initial service objective is operational evidence, not a measured availabili
 | 401 | Verify bearer credential and header through a private channel. A rotated token may take up to 60 seconds to replace the runtime cache. Do not paste headers into logs. |
 | 400 | One JSON `question` field, 1–500 characters, no controls, no query parameters, no obvious credentials; body <=4 KiB. |
 | 429 | Gateway burst/rate capacity or global daily limit. Daily count resets by UTC date; declined/failed attempts consume quota. Do not raise the limit to silence unexplained load. |
-| 503 | Inspect metadata outcomes, provider service status, secret metadata/IAM, and Treasury source availability. Never disable screening or freshness checks to restore an answer. |
+| 200 `no_data` | The exact requested date or maturity was not published. Check the readable monthly `source_url` and XML `data_url`; do not replace a weekend/holiday with a neighboring date. This is a domain result, not a dependency outage. |
+| 503 | Inspect metadata outcomes, provider service status, secret metadata/IAM, and Treasury source availability or invalid data. Never disable screening, date validation, or freshness checks to restore an answer. |
 | Pending history | A process died or persistence failed. The 28-second hard Lambda timeout bounds work; cumulative dependency delays can exhaust it. A pending record is not a completed answer. Retry is a new request and consumes quota. |
-| Wrong/old rate | Inspect returned observation date/source, compare official Treasury feed, stop serving if integrity is doubtful. Source must be <=7 calendar days old by default. |
+| Wrong/old rate | Inspect each returned observation date and official source. Latest observations must be <=7 calendar days old by default; explicit historical dates must match exactly and lie between 1990-01-02 and today's New York date. A historical result is not subject to the latest-data freshness window. Stop serving if integrity is doubtful. |
 | Timeout / throttles | Inspect API latency, Lambda concurrency, and provider rate limits. The gateway integration timeout is 29 seconds, Lambda 28 seconds; no provider retries. Lambda shares account concurrency capacity by default, so other functions can consume that capacity. Avoid scaling before understanding costs. |
+
+A question can select at most two maturities and two dates, with `latest` allowed alongside one exact date. One OpenAI call selects the bounded lookup; Python validates dates and maturities. Up to three monthly source downloads cover the requested dates and any latest-month fallback. Single-date evidence retains the `as_of`/`rates` shape; a date comparison uses `evidence.observations`. Each observation links to a readable monthly table (`source_url`) and its raw XML (`data_url`). No AWS resources or deployment parameters change for historical support.
 
 ## Stop, rotate, restore
 
@@ -52,7 +55,9 @@ aws lambda delete-function-concurrency --function-name askbrieves-api --region u
 
 If the recorded configuration had a positive reservation, restore that exact value with `put-function-concurrency --reserved-concurrent-executions VALUE` instead. These are emergency drift operations. Record the incident/change, restore the declared setting, and reconcile with IaC. Revoking the OpenAI key is an additional provider-side cutoff; it does not stop unauthenticated AWS request charges.
 
-Rotate the shared API token by creating a new secret version with a fresh random `token` field in Secrets Manager, distribute privately, and allow up to60 seconds for caches. Rotate the OpenAI project key by updating `api_key` in its secret and revoke the old key after testing. Do not send values through GitHub or chat. The Lambda role can read only the two referenced secrets. Secrets using a customer-managed KMS key require an explicitly scoped `kms:Decrypt` grant; the provided template assumes the AWS-managed Secrets Manager key.
+Rotate owner access by updating the secret's `token` field with a fresh high-entropy value, preserving reviewer fields. Optional `reviewer_token` (12–512 characters) requires `reviewer_expires_at` (integer UTC epoch). Give it a short lifetime and revoke it by expiring or removing those fields. Missing reviewer fields do not disable owner access. Allow up to 60 seconds for caches. The temporary reviewer credential is a demo convenience, not a production password policy.
+
+Rotate the OpenAI project key in its separate `api_key` secret and revoke the old key after testing. Never commit credentials or post them in public issues. Runtime IAM still reads only the two existing secrets. A customer-managed KMS key needs scoped `kms:Decrypt`; the template assumes the AWS-managed Secrets Manager key.
 
 ## Releases and rollback
 
