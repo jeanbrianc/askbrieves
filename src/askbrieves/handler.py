@@ -23,7 +23,8 @@ DECLINED = ("I can report the latest published U.S. Treasury par yield for one o
 SECRET_PATTERN = re.compile(r"\b(?:sk-[A-Za-z0-9_-]{16,}|(?:AKIA|ASIA)[A-Z0-9]{16})\b")
 PUBLIC_ASSETS = {"/": ("index.html", "text/html; charset=utf-8"),
                  "/app.js": ("app.js", "text/javascript; charset=utf-8"),
-                 "/styles.css": ("styles.css", "text/css; charset=utf-8")}
+                 "/styles.css": ("styles.css", "text/css; charset=utf-8"),
+                 "/brand.png": ("brand.png", "image/png")}
 
 
 class InvalidQuestion(ValueError):
@@ -109,10 +110,13 @@ def lambda_handler(event, context):
         path = event.get("rawPath", "")
         if method == "GET" and path in PUBLIC_ASSETS:
             filename, content_type = PUBLIC_ASSETS[path]
-            body = (Path(__file__).parent / "web" / filename).read_text(encoding="utf-8")
+            asset = Path(__file__).parent / "web" / filename
+            body = base64.b64encode(asset.read_bytes()).decode() if content_type == "image/png" else asset.read_text(encoding="utf-8")
             status, outcome = 200, "web_asset"
             result = response(status, body, request_id, text=True)
             result["headers"]["content-type"] = content_type
+            if content_type == "image/png":
+                result["isBase64Encoded"] = True
             return result
         if method == "GET" and path == "/health":
             status, outcome = 200, "healthy"

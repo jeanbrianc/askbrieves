@@ -250,6 +250,15 @@
         "Target": {"Fn::Sub": "integrations/${Integration}"}
       }
     },
+    "BrandRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Properties": {
+        "ApiId": {"Ref": "Api"},
+        "RouteKey": "GET /brand.png",
+        "AuthorizationType": "NONE",
+        "Target": {"Fn::Sub": "integrations/${Integration}"}
+      }
+    },
     "HealthRoute": {
       "Type": "AWS::ApiGatewayV2::Route",
       "Properties": {
@@ -279,7 +288,7 @@
     },
     "Stage": {
       "Type": "AWS::ApiGatewayV2::Stage",
-      "DependsOn": ["RootRoute", "ScriptRoute", "StylesRoute", "HealthRoute", "QuestionsRoute", "HistoryRoute"],
+      "DependsOn": ["RootRoute", "ScriptRoute", "StylesRoute", "BrandRoute", "HealthRoute", "QuestionsRoute", "HistoryRoute"],
       "Properties": {
         "ApiId": {"Ref": "Api"},
         "StageName": "$default",

@@ -12,7 +12,7 @@ def main():
     path = build / "askbrieves.zip"
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
         sources = list((root / "src" / "askbrieves").glob("*.py"))
-        sources += [p for p in (root / "src" / "askbrieves" / "web").glob("*") if p.suffix in (".html", ".js", ".css")]
+        sources += [p for p in (root / "src" / "askbrieves" / "web").glob("*") if p.suffix in (".html", ".js", ".css", ".png")]
         for source in sorted(sources):
             entry = zipfile.ZipInfo(str(source.relative_to(root / "src")), date_time=(2026, 1, 1, 0, 0, 0))
             entry.compress_type = zipfile.ZIP_DEFLATED

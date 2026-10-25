@@ -30,7 +30,7 @@ def main():
     parsed_url = urllib.parse.urlsplit(base)
     assert parsed_url.scheme == "https" and parsed_url.hostname and not parsed_url.username and not parsed_url.password
     token = os.environ["ASKBRIEVES_TOKEN"]
-    for path, expected in [("/", "<title>AskBrieves"), ("/app.js", "use strict"), ("/styles.css", "app-shell")]:
+    for path, expected in [("/", "<title>AskBrieves"), ("/app.js", "use strict"), ("/styles.css", "composer")]:
         status, body = request(base, path)
         assert status == 200 and expected in body, ("web_asset", path, status)
         time.sleep(1.1)

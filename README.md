@@ -6,7 +6,7 @@ Open the chat at **https://askbrieves.brianjeanbuilds.com**. The page, its asset
 
 ## Try it
 
-Visit the site and enter the **demo bearer token**, obtained from Brian through a private channel. This is not an OpenAI API key. The chat keeps it in page memory only, without writing it to browser storage or cookies. Ask a supported Treasury yield question or view recent history; all token holders share the same read-only history view.
+Visit the site, write a question, and use **Access** to enter the demo bearer token obtained privately from Brian. This is not an OpenAI API key. The single-screen chat uses Brian's supplied mascot/logo, two example prompts, and a bottom composer. The token stays in page memory only, without browser storage or cookies. Token holders share the same read-only history view.
 
 The command-line client is also available. Python 3.13+ is sufficient; no packages are required. It prompts for the token without echoing it, so it does not enter shell history.
 

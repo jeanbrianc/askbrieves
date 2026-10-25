@@ -2,7 +2,7 @@
 
 Verified on 2026-10-25. This evidence excludes credentials, private question history, and raw AWS payloads.
 
-- Full offline test suite: **90 passed, 30 subtests passed**.
+- Full offline test suite: **91 passed, 30 subtests passed**.
 - Both CloudFormation templates passed cfn-lint 1.58.0 without warnings and AWS ValidateTemplate.
 - Pure-Python package builds reproducibly on Apple Silicon, including browser assets. No Docker or native compilation required.
 - GitHub Actions runs tests, infrastructure lint, and packaging on Python 3.13 without AWS credentials.
