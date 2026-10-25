@@ -9,6 +9,7 @@
   let busy = false;
   let activeRequest = null;
   let session = 0;
+  let contextId = null;
 
   function updateControls() {
     $("send-button").disabled = busy || !question.value.trim();
@@ -107,6 +108,7 @@
     const draft = preserveDraft ? question.value : "";
     // Invalidate callbacks before aborting: cancellation alone cannot revoke them.
     session += 1;
+    contextId = null;
     const previousRequest = activeRequest;
     activeRequest = null;
     token = nextToken;
@@ -202,9 +204,10 @@
     thinking.classList.add("thinking");
     updateControls();
     try {
-      const data = await api("/questions", {method: "POST", body: JSON.stringify({question: text.replace(/[\r\n\t]+/g, " ")})}, requestSession);
+      const data = await api("/questions", {method: "POST", body: JSON.stringify({question: text.replace(/[\r\n\t]+/g, " "), ...(contextId ? {context_id: contextId} : {})})}, requestSession);
       if (requestSession !== session) return;
       thinking.remove();
+      if (typeof data.context_id === "string") contextId = data.context_id;
       addMessage("assistant", data.answer, {evidence: data.evidence});
     } catch (error) {
       if (requestSession !== session) return;
@@ -231,6 +234,7 @@
       const data = await api("/history", {}, requestSession);
       if (requestSession !== session) return;
       if (!Array.isArray(data.items)) throw new Error("History unavailable.");
+      contextId = null;
       showEmptyState();
       if (!data.items.length) showNotice("No history yet.");
       else {
@@ -249,6 +253,7 @@
   });
   $("clear-button").addEventListener("click", () => {
     if (busy) return;
+    contextId = null;
     showEmptyState();
     showNotice("");
   });
