@@ -38,6 +38,12 @@ CloudWatch metadata matched returned IDs: single-yield lookup `status=200 outcom
 - DynamoDB encryption, TTL on `expires_at`, and point-in-time recovery enabled. API/Lambda log retention 14 days.
 - Runtime IAM scoped to two secrets, one table, one log group; no wildcard allow resources.
 
-## Browser acceptance
+## Final branded chat release
 
-The chat page and assets are being deployed and checked. Final browser acceptance and package digest will be recorded before handoff.
+- CloudFormation update completed; Lambda active. Artifact SHA-256 `ef6b83d62324c973c23d8f0bafc2ca322ac925c06d3095995dc5610b1a2e80d0` matches Lambda's deployed code digest.
+- Immutable artifact: `s3://askbrieves-artifacts-artifacts-lsci3aluirc3/releases/ef6b83d62324c973c23d8f0bafc2ca322ac925c06d3095995dc5610b1a2e80d0/askbrieves.zip`.
+- Browser layouts visually checked at desktop and narrow widths. The initial view is one chat screen with the supplied mascot/logo, two suggestions, and a bottom composer; about 25 visible words. The supplied PNG is served byte-for-byte unchanged.
+- Example selection, keyboard send, compact access dialog, rejected-token recovery, and restored-question behavior verified in a real browser. Successful authenticated answers and history were verified against the same deployed API using the secret-safe acceptance script.
+- Final deployed acceptance suite passed: all browser assets, liveness, missing/incorrect-token rejection, malformed-input rejection, real OpenAI/Treasury lookup and comparison, four scope refusals, and persisted history.
+- Final single-yield request: `8ab3efb0-cfbe-410b-828e-d9292c011c23`; comparison: `578103de-f880-4740-8c90-b3c1dc5a00b8`. Both returned the same dated source values shown above.
+- GitHub Actions passed for the runtime release. Final documentation changes do not change the deployed package.
