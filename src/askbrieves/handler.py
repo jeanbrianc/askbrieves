@@ -92,7 +92,7 @@ def answer_from_evidence(evidence, maturities):
 
 
 def process_question(question, request_id, now, principal="owner"):
-    storage.claim_daily_request(now)
+    storage.claim_request(now)
     item = storage.start_history(request_id, question, now, principal=principal)
     try:
         plan = plan_question(question, storage.secret(os.environ["OPENAI_SECRET_ARN"], "api_key"))
@@ -164,9 +164,14 @@ def lambda_handler(event, context):
         # Only input-validation messages are returned; secret/config errors stay private.
         status, outcome = 400, "invalid_request"
         return response(status, {"error": "Invalid request. Use JSON with one question of 1-500 characters; do not include secrets."}, request_id)
-    except storage.DailyLimitExceeded:
-        status, outcome = 429, "daily_limit"
-        return response(status, {"error": "Daily question limit reached. Resets at 00:00 UTC."}, request_id)
+    except storage.RequestLimitExceeded:
+        status, outcome = 429, "review_limit_exceeded"
+        return response(status, {"error": "Review request allowance exhausted. It does not reset daily.",
+                                 "code": "review_limit_exceeded"}, request_id)
+    except storage.ReviewWindowClosed:
+        status, outcome = 403, "review_window_closed"
+        return response(status, {"error": "The seven-day review window is not active.",
+                                 "code": "review_window_closed"}, request_id)
     except Exception:
         # Final boundary intentionally suppresses private provider/AWS error payloads.
         status, outcome = 503, "unavailable"

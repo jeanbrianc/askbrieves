@@ -290,6 +290,28 @@ test("a same-session error restores the question and a successful retry works", 
   assert.equal(ui.get("question").value, "");
 });
 
+test("quota and traffic throttles never promise a daily reset", async () => {
+  const ui = fixture();
+  await ui.connect(REVIEWER);
+  const pending = ui.submit(REVIEWER_QUESTION);
+  ui.requests[0].respond({code: "review_limit_exceeded"}, 429);
+  await pending;
+  assert.match(ui.messages()[1], /does not reset daily/);
+  assert.doesNotMatch(ui.messages()[1], /midnight|resets at/i);
+  assert.equal(ui.get("question").value, REVIEWER_QUESTION);
+});
+
+test("a closed review window explains expiry without disconnecting history access", async () => {
+  const ui = fixture();
+  await ui.connect(OWNER);
+  const pending = ui.submit(OWNER_QUESTION);
+  ui.requests[0].respond({code: "review_window_closed"}, 403);
+  await pending;
+  assert.match(ui.messages()[1], /seven-day review window is not active/i);
+  assert.equal(ui.get("access-button").textContent, "Connected");
+  assert.equal(ui.get("question").getAttribute("aria-busy"), "false");
+});
+
 test("same-session history replaces the transcript and preserves chronological order", async () => {
   const ui = fixture();
   await seedOwnerHistory(ui);

@@ -136,7 +136,8 @@
         showNotice("Access token not accepted. Reconnect to try again.", true);
         throw new Error("Access token not accepted. Reconnect to try again.");
       }
-      if (response.status === 429) throw new Error("Request limit reached. Please try later; the daily limit resets at midnight UTC.");
+      if (response.status === 429) throw new Error("Request limit reached. Retry shortly for a traffic throttle; the review allowance does not reset daily.");
+      if (response.status === 403) throw new Error("The seven-day review window is not active. Contact the service owner.");
       if (response.status === 503) throw new Error("Rates are unavailable right now. Please try again shortly.");
       if (!response.ok) throw new Error("Couldn’t complete that request. Please try again.");
       try {

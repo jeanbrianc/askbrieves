@@ -14,6 +14,8 @@ The design puts a flexible language interface around a small set of verifiable o
 
 The bearer token authorizes this service; it is not the server's OpenAI API key. It stays in tab memory, without browser storage or cookies, so reconnect after refreshing. Changing credentials, disconnecting, or leaving the page clears the local transcript and draft; callbacks from an old session cannot repopulate them. A question typed before first connecting is preserved. Questions are independent: include the maturity and date in each question rather than relying on earlier messages. Reviewer history is separate from owner history; people sharing the reviewer token share that audience's history. New questions create new history entries.
 
+The review has **1,000 total question attempts over one seven-day window**, shared by owner and reviewer access. There is no daily allowance or midnight reset: use the attempts whenever needed before the window closes. Refusals, missing-data results, and failed provider attempts count because they consume resources. Invalid requests, failed authentication, and history reads do not consume the question allowance.
+
 The page, assets, and `GET /health` are public. Health reports that the handler is running; it does not check OpenAI, Treasury, secrets, or the database.
 
 ### Use the command-line client
@@ -42,7 +44,7 @@ For your own deployment, pass its endpoint explicitly: `python3 scripts/client.p
 
 ## Supported behavior and API
 
-The API accepts `POST /questions`, JSON `{"question":"What's the 10-year Treasury yield?"}`, and `Authorization: Bearer <token>`. It returns JSON containing a plain-language `answer`, `status`, `request_id`, and source evidence for answered questions. `GET /history` returns the newest 20 records. Authentication failures are 401; malformed inputs 400; exhausted daily quota 429; unavailable dependencies or invalid data 503. A deliberate scope refusal is 200 with `status: declined`. A supported date with no published observation or requested maturity is 200 with `status: no_data`; the service explains the gap without substituting another date or tenor.
+The API accepts `POST /questions`, JSON `{"question":"What's the 10-year Treasury yield?"}`, and `Authorization: Bearer <token>`. It returns JSON containing a plain-language `answer`, `status`, `request_id`, and source evidence for answered questions. `GET /history` returns the newest 20 records. Authentication failures are 401; malformed inputs 400; exhausted review quota 429 with code `review_limit_exceeded`; an inactive/expired question window is 403 with code `review_window_closed`; unavailable dependencies or invalid data are 503. Gateway burst throttles can also return 429 and require a short retry, while the total review quota has no daily reset. A deliberate scope refusal is 200 with `status: declined`. A supported date with no published observation or requested maturity is 200 with `status: no_data`; the service explains the gap without substituting another date or tenor.
 
 Example answer shape (illustrative values, not a current quote):
 
@@ -64,7 +66,7 @@ flowchart LR
     L --> T[Treasury monthly XML]
 ```
 
-1. Authenticate, validate a body of at most 4 KiB and a question of at most 500 characters, atomically claim one of 100 daily attempts, and save a pending history entry.
+1. Authenticate, validate a body of at most 4 KiB and a question of at most 500 characters, check the seven-day question window, atomically claim one of its 1,000 attempts, and save a pending history entry.
 2. Make **one** OpenAI Responses API call. Strict function schemas offer rate lookup, a reviewed concept explanation, a fixed 2-year/10-year curve assessment, or decline. The model reviews the entire question and chooses an action. Python independently validates tool count, names, fields, topic/maturity enums, and date bounds.
 3. Execute the fixed Treasury adapter with at most three monthly downloads per request: two requested months and, if needed, a previous-month fallback for latest. Latest observations must be no more than seven calendar days old and never in the future. Historical lookups select the exact requested row, with no weekend or holiday substitution. Missing observations or tenors return `no_data`; invalid source data fails closed. Each comparison uses the requested maturities from the same dated row.
 4. Format the answer and any basis-point spread in Python, then persist the result **before** returning it. The model supplies neither numeric rates nor arbitrary final prose.
@@ -101,7 +103,7 @@ The function uses Lambda's provided boto3. That keeps the deployment small but a
 
 ### Match DynamoDB to the access patterns, make persistence part of success
 
-The service needs three operations: record/update a request, query recent audience history, and atomically increment a daily counter. DynamoDB supports those operations without a relational schema, connection pool, or capacity planning in on-demand mode. Conditional writes enforce the global daily allowance even when requests arrive concurrently.
+The service needs three operations: record/update a request, query recent audience history, and atomically increment a review-window counter. DynamoDB supports those operations without a relational schema, connection pool, or capacity planning in on-demand mode. Conditional writes enforce one global allowance even when requests arrive concurrently. Every request in the configured seven-day window uses the same counter, including across midnight; ordinary code deployments preserve the deadline and counter. Counter TTL is after the window ends, so it cannot expire and reopen the allowance while access is active.
 
 A pending history record is written before model work, and the completed answer must be persisted before a successful response is returned. That makes persistence a condition of a successful API response. The cost is availability: a history-store failure prevents a successful answer even if the provider returned usable data. Failed and declined attempts consume quota because they still use resources.
 
@@ -111,7 +113,7 @@ History has a 30-day visibility window and TTL, encryption, point-in-time recove
 
 A generated owner bearer credential and an optional expiring reviewer credential are sufficient for a small, privately shared demo. Fixed history partitions keep reviewer traffic separate from owner traffic without introducing an identity platform. The OpenAI key stays in a different Secrets Manager secret and never belongs in a browser or client command. Runtime IAM names only the two required secrets, one table, and the function log group. A 60-second secret cache reduces repeated reads while allowing rotation to take effect shortly afterward.
 
-This is audience isolation, not individual user or tenant isolation. Reviewers sharing a credential share their history and the global allowance. Use a generated random reviewer token with a short expiry and distribute it privately. Production multi-client access would require per-client identity, authorization, revocation, and quotas. The API's daily attempt cap limits model use; it does not cap AWS charges from public traffic. Gateway throttling applies per route and is best effort; the function uses shared account concurrency by default rather than requiring a new capacity reservation.
+This is audience isolation, not individual user or tenant isolation. Reviewers sharing a credential share their history and the 1,000-attempt review allowance. Use a generated random reviewer token with an expiry at or before the question-window deadline and distribute it privately. Production multi-client access would require per-client identity, authorization, revocation, and quotas. The review attempt cap limits model use; it does not cap AWS charges from public traffic. Gateway throttling applies per route and is best effort; the function uses shared account concurrency by default rather than requiring a new capacity reservation.
 
 ### Make infrastructure and releases explicit
 
@@ -134,7 +136,7 @@ The accepted cost is that public asset requests also invoke Lambda, and the page
 | Access | Generated 48-character owner credential; optional expiring reviewer credential. Constant-time comparison and HTTPS. Reviewers cannot choose or read the owner's history partition. Reviewer access is a temporary demo convenience, not a production identity system. |
 | Agent authority | One model call; schema-constrained lookup, explanation, curve assessment or decline; no generic tools; local validation; fixed numeric/prose output path. Scope classification is probabilistic, not a formal guarantee. |
 | Data integrity | Fixed Treasury host/path, redirects disabled, XML DTD/entities rejected, 1 MiB source cap, locally validated dates, exact historical observations, freshness checks for latest, decimal arithmetic. Missing data is reported explicitly; no invented fallback rates. |
-| Cost containment | Per-route API target 1 request/second, burst 2; global atomic 100 attempts per UTC day; one model call with 256 output tokens; at most three monthly source downloads; no automatic provider retry. Lambda shares existing account concurrency capacity by default. Refusals, no-data results, and failed attempts consume quota. Gateway throttling is best effort; this is not a hard dollar cap. |
+| Cost containment | Per-route API target 1 request/second, burst 2; global atomic allowance of 1,000 attempts total over seven days, with no daily reset; one model call with 256 output tokens; at most three monthly source downloads; no automatic provider retry. Lambda shares existing account concurrency capacity by default. Refusals, no-data results, and failed attempts consume quota. Gateway throttling is best effort; this is not a hard dollar cap. |
 | Secrets / IAM | Secret ARNs in config, values fetched only by runtime, 60-second cache. Function permissions name its two secrets, its one table, and its log group. No trading, account access, or general AWS authority. |
 | History / privacy | Accepted questions, decisions, and answers retained for 30 days; query hides expired history even before asynchronous TTL deletion. No prompts, answers, tokens, IPs, or provider bodies in application/access logs; log retention 14 days. Do not submit PII or credentials. Obvious API/AWS key patterns are rejected, not comprehensive PII detection. |
 | Fail closed | Auth, model, source, quota-store, or history-store errors cannot produce a successful rate answer. A crash/timeout can leave a pending history entry; retries are new attempts, with no exactly-once promise. |
@@ -188,9 +190,11 @@ The script tests/lints, packages, deploys `<stack>-artifacts`, uploads the packa
 
 The service stack prints `Endpoint`, `ApiAccessSecretArn`, and operational resource outputs. In Secrets Manager, open the generated API-access secret privately and use its `token` field to connect to your endpoint. The deployment creates TLS 1.2 minimum, IPv4/IPv6 DNS aliases, and disables the default execute-api endpoint when a custom domain is configured. For a default deployment, omitting `ASKBRIEVES_STACK` selects `askbrieves`.
 
-The default `ReservedConcurrency=-1` omits a Lambda reservation and shares existing account capacity. The script does not request a quota increase. An optional positive `ASKBRIEVES_RESERVED_CONCURRENCY` setting reserves and limits function capacity when the regional account has enough available; the API throttle and daily request cap apply in either mode.
+`RequestLimit` defaults to 1,000 (configurable from 1 to 1,000), and `ReviewWindowEndsAt` is the UTC epoch second at the end of a fixed seven-day window. On a new stack, the release script chooses an end seven days from deployment; on an update it preserves the existing end and limit, even if the window has expired. A direct CloudFormation deployment must supply `ReviewWindowEndsAt` explicitly. To intentionally open a fresh review window, set `ASKBRIEVES_REVIEW_WINDOW_ENDS_AT` to the desired end epoch before invoking the script; `ASKBRIEVES_REQUEST_LIMIT` can explicitly set its limit. Changing the deadline identifies a new allowance, so it is an operator action, never an automatic renewal or client-selected field. See [operations](docs/operations.md) for activation and audit-preservation steps.
 
-Optional reviewer access uses `reviewer_token` and integer UTC epoch `reviewer_expires_at` fields in the same secret, preserving the existing owner `token`. Reviewer tokens accept 12–512 characters and require a future expiry; owner tokens remain 20–512 characters. Generate reviewer values with at least 32 random bytes (for example, a 43-character URL-safe encoding), rather than choosing a memorable phrase. Distribute values privately, never through this public repository. Both audiences share the global daily allowance.
+The default `ReservedConcurrency=-1` omits a Lambda reservation and shares existing account capacity. The script does not request a quota increase. An optional positive `ASKBRIEVES_RESERVED_CONCURRENCY` setting reserves and limits function capacity when the regional account has enough available; the API throttle and review request cap apply in either mode.
+
+Optional reviewer access uses `reviewer_token` and integer UTC epoch `reviewer_expires_at` fields in the same secret, preserving the existing owner `token`. Align that expiry with or before `ReviewWindowEndsAt`; both authentication and the model-request window must permit a question. Reviewer tokens accept 12–512 characters; owner tokens remain 20–512 characters. Generate reviewer values with at least 32 random bytes (for example, a 43-character URL-safe encoding), rather than choosing a memorable phrase. Distribute values privately, never through this public repository. Both audiences share the review allowance.
 
 ### Verify your deployment
 
@@ -208,7 +212,7 @@ subprocess.run([sys.executable, "scripts/smoke.py"], check=True)
 PY
 ```
 
-The baseline suite requires working AWS/provider configuration behind the endpoint, uses real OpenAI/Treasury calls, consumes **11 daily attempts**, and writes **11 synthetic history entries**. `ASKBRIEVES_URL` is required for another deployment; otherwise the suite targets Brian's hosted service. A passing health check alone does not establish these dependencies are working.
+The baseline suite requires working AWS/provider configuration behind the endpoint, uses real OpenAI/Treasury calls, consumes **11 review-window attempts**, and writes **11 synthetic history entries**. `ASKBRIEVES_URL` is required for another deployment; otherwise the suite targets Brian's hosted service. A passing health check alone does not establish these dependencies are working.
 
 For the additional seven explanations, latest/historical curve assessments, dated changes, refusals, and owner/reviewer isolation, run the optional extended suite with two distinct credentials:
 
@@ -225,7 +229,7 @@ subprocess.run([sys.executable, "scripts/smoke_review.py"], check=True)
 PY
 ```
 
-The extended suite adds **13 daily attempts and 13 reviewer history records**; it does not rerun the baseline or delete history. It requires a nonempty owner history so the isolation check has real evidence; run the baseline first on a fresh deployment. Both suites together consume 24 attempts. Use private test credentials, and clean up reviewer test history before handing over that audience. Never point the live suite at an audience whose existing history you intend to keep empty. See the [handoff verification](docs/verification-handoff.md) for the deployed check and cleanup evidence.
+The extended suite adds **13 review-window attempts and 13 reviewer history records**; it does not rerun the baseline or delete history. It requires a nonempty owner history so the isolation check has real evidence; run the baseline first on a fresh deployment. Both suites together consume 24 attempts. Use a separate validation window and private test credentials, then explicitly activate the reviewer's fresh seven-day window and clean up reviewer test history before handoff. Old counters remain for audit; cleanup does not erase consumed usage. See the [review-window verification](docs/verification-review-window.md) for current activation evidence and [handoff verification](docs/verification-handoff.md) for the preceding session fix.
 
 See [operations](docs/operations.md) before changing quotas or credentials, stopping the function, rolling back an artifact, or deleting stacks. Retained data, secrets, artifacts, and DNS validation records require explicit cleanup after stack deletion.
 

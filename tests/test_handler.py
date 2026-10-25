@@ -27,7 +27,7 @@ def deps(monkeypatch):
     monkeypatch.setenv("API_SECRET_ARN", "access-secret")
     monkeypatch.setenv("OPENAI_SECRET_ARN", "openai-secret")
     dependencies = {}
-    for name in ("claim_daily_request", "start_history", "finish_history", "recent_history", "secret"):
+    for name in ("claim_request", "start_history", "finish_history", "recent_history", "secret"):
         mock = Mock()
         monkeypatch.setattr(handler.storage, name, mock)
         dependencies[name] = mock
@@ -48,7 +48,7 @@ def deps(monkeypatch):
 def test_authentication_precedes_any_model_history_or_quota_use(deps, token, method, path):
     result = handler.lambda_handler(event(method, path, token), None)
     assert result["statusCode"] == 401
-    for name in ("claim_daily_request", "start_history", "recent_history", "plan", "fetch"):
+    for name in ("claim_request", "start_history", "recent_history", "plan", "fetch"):
         deps[name].assert_not_called()
     assert TOKEN not in result["body"]
 
@@ -75,7 +75,7 @@ def test_invalid_questions_never_reach_provider_or_history(deps, question):
     assert result["statusCode"] == 400
     deps["plan"].assert_not_called()
     deps["start_history"].assert_not_called()
-    deps["claim_daily_request"].assert_not_called()
+    deps["claim_request"].assert_not_called()
 
 
 @pytest.mark.parametrize("body,overrides", [
@@ -91,7 +91,7 @@ def test_invalid_body_is_rejected_before_quota(deps, body, overrides):
     request = dict(event(), body=body, **overrides)
     result = handler.lambda_handler(request, None)
     assert result["statusCode"] == 400
-    deps["claim_daily_request"].assert_not_called()
+    deps["claim_request"].assert_not_called()
 
 
 def test_content_type_and_query_contract(deps):
@@ -168,12 +168,37 @@ def test_start_history_failure_prevents_provider_call(deps):
     deps["plan"].assert_not_called()
 
 
-def test_daily_limit_stops_processing(deps):
-    deps["claim_daily_request"].side_effect = handler.storage.DailyLimitExceeded()
+def test_review_request_limit_stops_processing(deps):
+    deps["claim_request"].side_effect = handler.storage.RequestLimitExceeded()
     result = handler.lambda_handler(event(), None)
     assert result["statusCode"] == 429
+    body = json.loads(result["body"])
+    assert body["code"] == "review_limit_exceeded"
+    assert "does not reset daily" in body["error"]
     deps["plan"].assert_not_called()
     deps["start_history"].assert_not_called()
+    deps["finish_history"].assert_not_called()
+    deps["fetch"].assert_not_called()
+    deps["secret"].assert_not_called()
+
+
+def test_inactive_review_window_stops_processing_before_history_or_provider(deps):
+    deps["claim_request"].side_effect = handler.storage.ReviewWindowClosed()
+    result = handler.lambda_handler(event(), None)
+    assert result["statusCode"] == 403
+    assert json.loads(result["body"])["code"] == "review_window_closed"
+    for name in ("start_history", "finish_history", "plan", "fetch", "secret"):
+        deps[name].assert_not_called()
+
+
+def test_invalid_quota_configuration_is_a_generic_failure_without_private_details(deps, capsys):
+    deps["claim_request"].side_effect = ValueError("private invalid configuration")
+    result = handler.lambda_handler(event(), None)
+    assert result["statusCode"] == 503
+    assert "private" not in result["body"]
+    assert "private" not in capsys.readouterr().out
+    for name in ("start_history", "finish_history", "plan", "fetch", "secret"):
+        deps[name].assert_not_called()
 
 
 def test_history_only_reads_after_auth(deps):
@@ -182,7 +207,7 @@ def test_history_only_reads_after_auth(deps):
     assert result["statusCode"] == 200
     assert json.loads(result["body"])["items"][0]["question"] == QUESTION
     deps["plan"].assert_not_called()
-    deps["claim_daily_request"].assert_not_called()
+    deps["claim_request"].assert_not_called()
 
 
 def test_basis_point_spread_uses_exact_decimal_arithmetic():

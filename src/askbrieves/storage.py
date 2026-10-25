@@ -3,6 +3,7 @@
 import json
 import hmac
 import os
+import re
 import time
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -14,7 +15,11 @@ from botocore.config import Config
 CONFIG = Config(connect_timeout=1, read_timeout=2, retries={"total_max_attempts": 1, "mode": "standard"})
 
 
-class DailyLimitExceeded(Exception):
+class RequestLimitExceeded(Exception):
+    pass
+
+
+class ReviewWindowClosed(Exception):
     pass
 
 
@@ -77,16 +82,31 @@ def _history_partition(principal):
     return "history" if principal == "owner" else "history#reviewer"
 
 
-def claim_daily_request(now):
+def claim_request(now):
+    """Claim one attempt in the fixed seven-day window, without a daily reset."""
+    raw_limit = os.getenv("REQUEST_LIMIT", "1000")
+    raw_end = os.getenv("REVIEW_WINDOW_ENDS_AT", "")
+    if any(len(value) > 10 or not re.fullmatch(r"[0-9]+", value)
+           for value in (raw_limit, raw_end)):
+        raise ValueError("Invalid review allowance configuration")
+    limit, window_end = int(raw_limit), int(raw_end)
+    if not 1 <= limit <= 1000 or not 1 <= window_end <= 4102444800:
+        raise ValueError("Invalid review allowance configuration")
+    if not isinstance(now, datetime) or now.utcoffset() is None:
+        raise ValueError("Review allowance requires an aware timestamp")
+    if not window_end - 7 * 86400 <= now.timestamp() < window_end:
+        raise ReviewWindowClosed()
     store = table()
     try:
         store.update_item(
-            Key={"pk": "quota#" + now.date().isoformat(), "sk": "daily"},
-            UpdateExpression="SET expires_at = :expires ADD request_count :one",
-            ExpressionAttributeValues={":one": 1, ":expires": int(now.timestamp()) + 172800},
-            ConditionExpression=Attr("request_count").not_exists() | Attr("request_count").lt(int(os.getenv("DAILY_REQUEST_LIMIT", "100"))))
+            Key={"pk": "quota#review#" + str(window_end), "sk": "total"},
+            UpdateExpression=("SET expires_at = :expires, request_limit = :limit, "
+                              "window_ends_at = :end ADD request_count :one"),
+            ExpressionAttributeValues={":one": 1, ":expires": window_end + 172800,
+                                       ":limit": limit, ":end": window_end},
+            ConditionExpression=Attr("request_count").not_exists() | Attr("request_count").lt(limit))
     except store.meta.client.exceptions.ConditionalCheckFailedException as exc:
-        raise DailyLimitExceeded() from exc
+        raise RequestLimitExceeded() from exc
 
 
 def start_history(request_id, question, now, principal="owner"):
