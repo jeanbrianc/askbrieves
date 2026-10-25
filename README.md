@@ -1,6 +1,6 @@
 # AskBrieves
 
-A small agentic service that answers questions about **latest and dated U.S. Treasury par yields**. Built for the ModernFi platform engineering take-home, with the emphasis on bounded behavior, repeatable deployment, and clear operational tradeoffs.
+A small agentic service that answers questions about **latest and dated U.S. Treasury par yields**, with bounded behavior, repeatable deployment, and clear operational tradeoffs.
 
 Open the chat at **https://askbrieves.brianjeanbuilds.com**. The page, its assets, and `GET /health` are public; questions and history require the demo bearer token. See the [reviewer access verification](docs/verification-reviewer.md), [historical release proof](docs/verification-historical.md), and [initial deployment evidence](docs/verification.md).
 
@@ -59,7 +59,7 @@ Each question is sent to the OpenAI Responses API using the server-side project 
 
 **Small chat interface:** plain HTML, JavaScript, and CSS are served by the same Lambda, with no frontend build step, external assets, or analytics. A Content Security Policy restricts scripts, styles, and connections to the same origin. The UI uses the same authenticated API and scope controls as the CLI.
 
-**DynamoDB:** the access patterns are append/update a request, list recent history, and increment an atomic daily counter. There are no joins or business transactions requiring PostgreSQL. On-demand billing avoids capacity tuning for an interview demo. The table is encrypted, has point-in-time recovery, and is retained when the stack is deleted.
+**DynamoDB:** the access patterns are append/update a request, list recent history, and increment an atomic daily counter. There are no joins or business transactions requiring PostgreSQL. On-demand billing avoids capacity tuning for a small service. The table is encrypted, has point-in-time recovery, and is retained when the stack is deleted.
 
 **Plain CloudFormation:** explicit, reviewable AWS resources without another IaC state service or framework dependency. Pulumi would be reasonable in an existing Pulumi estate; this isolated service does not need a new toolchain. A separate bootstrap stack owns private artifact storage, and SHA-256-addressed package keys make rollback straightforward; bucket versioning does not make those keys write-once. Deployment is a human-invoked action; CI validates but has no AWS credentials or deployment permission.
 
@@ -108,4 +108,4 @@ Optional reviewer access uses `reviewer_token` and integer UTC epoch `reviewer_e
 
 Costs come from API/Lambda requests, DynamoDB requests/storage/PITR, two Secrets Manager secrets, logs, alarms, artifacts, and DNS. There is no NAT gateway, VPC, load balancer, container host, or database instance. The pinned model is `gpt-5.4-mini-2026-03-17`, with reasoning disabled for this small classification task. Review [current model pricing](https://developers.openai.com/api/docs/models/gpt-5.4-mini) and AWS pricing before raising the quota. Project budget alerts are useful but are not an application spending cutoff; unauthenticated traffic can still incur AWS request costs.
 
-For the 4–6 hour assignment, I prioritized deployability, explicit security boundaries, negative tests, and a usable runbook. Before a real multi-client rollout I would replace audience credentials with per-client identity and authorization, add WAF or an appropriate edge control and per-client quotas, connect alarms to an owned paging channel, define measured availability/latency SLOs, and add managed synthetic checks and a proper policy evaluation dataset. A multi-region system and an institutional compliance program are beyond this demo's scope.
+This service prioritizes deployability, explicit security boundaries, negative tests, and a usable runbook. Before a real multi-client rollout I would replace audience credentials with per-client identity and authorization, add WAF or an appropriate edge control and per-client quotas, connect alarms to an owned paging channel, define measured availability/latency SLOs, and add managed synthetic checks and a proper policy evaluation dataset. A multi-region system and an institutional compliance program are beyond this demo's scope.
