@@ -10,6 +10,7 @@ task_stack="${ASKBRIEVES_STACK:-askbrieves}"
 task_concurrency="${ASKBRIEVES_RESERVED_CONCURRENCY:--1}"
 cd "$(dirname "$0")/.."
 python3 -m pytest -q
+node --test tests/web_session.test.cjs
 cfn-lint infra/bootstrap.json infra/service.json
 python3 scripts/package.py
 aws cloudformation deploy --region "$task_region" --stack-name "${task_stack}-artifacts" \

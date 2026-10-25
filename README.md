@@ -12,7 +12,7 @@ The design puts a flexible language interface around a small set of verifiable o
 2. Select **Access** and enter the reviewer bearer token supplied privately by Brian. Ask for a fresh token if access has expired. No AWS account or OpenAI key is needed to use this deployment.
 3. Ask a question such as “What was the 10-year Treasury yield on October 23, 2025?” or “Is the yield curve inverted?” Use **History** to retrieve saved questions and answers.
 
-The bearer token authorizes this service; it is not the server's OpenAI API key. It stays in tab memory, without browser storage or cookies, so reconnect after refreshing. Questions are independent: include the maturity and date in each question rather than relying on earlier messages. Reviewer history is separate from owner history; people sharing the reviewer token share that audience's history. New questions create new history entries.
+The bearer token authorizes this service; it is not the server's OpenAI API key. It stays in tab memory, without browser storage or cookies, so reconnect after refreshing. Changing credentials, disconnecting, or leaving the page clears the local transcript and draft; callbacks from an old session cannot repopulate them. A question typed before first connecting is preserved. Questions are independent: include the maturity and date in each question rather than relying on earlier messages. Reviewer history is separate from owner history; people sharing the reviewer token share that audience's history. New questions create new history entries.
 
 The page, assets, and `GET /health` are public. Health reports that the handler is running; it does not check OpenAI, Treasury, secrets, or the database.
 
@@ -111,7 +111,7 @@ History has a 30-day visibility window and TTL, encryption, point-in-time recove
 
 A generated owner bearer credential and an optional expiring reviewer credential are sufficient for a small, privately shared demo. Fixed history partitions keep reviewer traffic separate from owner traffic without introducing an identity platform. The OpenAI key stays in a different Secrets Manager secret and never belongs in a browser or client command. Runtime IAM names only the two required secrets, one table, and the function log group. A 60-second secret cache reduces repeated reads while allowing rotation to take effect shortly afterward.
 
-This is audience isolation, not individual user or tenant isolation. Reviewers sharing a credential share their history and the global allowance. Production multi-client access would require per-client identity, authorization, revocation, and quotas. The API's daily attempt cap limits model use; it does not cap AWS charges from public traffic. Gateway throttling is best effort, and the function uses shared account concurrency by default rather than requiring a new capacity reservation.
+This is audience isolation, not individual user or tenant isolation. Reviewers sharing a credential share their history and the global allowance. Use a generated random reviewer token with a short expiry and distribute it privately. Production multi-client access would require per-client identity, authorization, revocation, and quotas. The API's daily attempt cap limits model use; it does not cap AWS charges from public traffic. Gateway throttling applies per route and is best effort; the function uses shared account concurrency by default rather than requiring a new capacity reservation.
 
 ### Make infrastructure and releases explicit
 
@@ -134,7 +134,7 @@ The accepted cost is that public asset requests also invoke Lambda, and the page
 | Access | Generated 48-character owner credential; optional expiring reviewer credential. Constant-time comparison and HTTPS. Reviewers cannot choose or read the owner's history partition. Reviewer access is a temporary demo convenience, not a production identity system. |
 | Agent authority | One model call; schema-constrained lookup, explanation, curve assessment or decline; no generic tools; local validation; fixed numeric/prose output path. Scope classification is probabilistic, not a formal guarantee. |
 | Data integrity | Fixed Treasury host/path, redirects disabled, XML DTD/entities rejected, 1 MiB source cap, locally validated dates, exact historical observations, freshness checks for latest, decimal arithmetic. Missing data is reported explicitly; no invented fallback rates. |
-| Cost containment | API target 1 request/second, burst 2; global atomic 100 attempts per UTC day; one model call with 256 output tokens; at most three monthly source downloads; no automatic provider retry. Lambda shares existing account concurrency capacity by default. Refusals, no-data results, and failed attempts consume quota. Gateway throttling is best effort; this is not a hard dollar cap. |
+| Cost containment | Per-route API target 1 request/second, burst 2; global atomic 100 attempts per UTC day; one model call with 256 output tokens; at most three monthly source downloads; no automatic provider retry. Lambda shares existing account concurrency capacity by default. Refusals, no-data results, and failed attempts consume quota. Gateway throttling is best effort; this is not a hard dollar cap. |
 | Secrets / IAM | Secret ARNs in config, values fetched only by runtime, 60-second cache. Function permissions name its two secrets, its one table, and its log group. No trading, account access, or general AWS authority. |
 | History / privacy | Accepted questions, decisions, and answers retained for 30 days; query hides expired history even before asynchronous TTL deletion. No prompts, answers, tokens, IPs, or provider bodies in application/access logs; log retention 14 days. Do not submit PII or credentials. Obvious API/AWS key patterns are rejected, not comprehensive PII detection. |
 | Fail closed | Auth, model, source, quota-store, or history-store errors cannot produce a successful rate answer. A crash/timeout can leave a pending history entry; retries are new attempts, with no exactly-once promise. |
@@ -143,18 +143,19 @@ This demonstrates security and audit controls; it does **not** assert SOC 2, SOC
 
 ## Verify locally
 
-From the cloned repository, use Python 3.13+ (for example, `python3.13` on macOS) to create an isolated environment:
+From the cloned repository, use Python 3.13+ (for example, `python3.13` on macOS) to create an isolated environment. Install Node.js 22+ for the offline browser-session tests; they use Node's built-in test runner, with no npm packages or frontend build step.
 
 ```bash
 python3.13 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements-dev.txt
 python -m pytest -q
+node --test tests/web_session.test.cjs
 cfn-lint infra/bootstrap.json infra/service.json
 python scripts/package.py
 ```
 
-After dependency installation, these checks run offline with mocked AWS, OpenAI, and Treasury boundaries. They need no credentials and do not change deployed history. Packaging writes `build/askbrieves.zip` and `build/sha256.txt`. CI repeats the same test/lint/package path on Python 3.13.
+After dependency installation, these checks run offline with mocked AWS, OpenAI, and Treasury boundaries. The JavaScript tests execute the actual chat script against a minimal synthetic DOM and deferred fetch responses, including credential changes, disconnects, empty history, and stale callbacks. They are not a full browser-engine compatibility test. All offline checks need no credentials and do not change deployed history. Packaging writes `build/askbrieves.zip` and `build/sha256.txt`. CI repeats the test/lint/package path on Python 3.13 and Node.js 22.
 
 Tests cover valid lookups and comparisons as well as malformed tools, prompt/scope boundaries, authentication and expiry, audience isolation, atomic quota behavior, unsafe XML, missing dates, stale/future data, persistence failures, and browser rendering contracts. Mocks establish code behavior; they do not prove provider availability or live-model policy compliance.
 
@@ -189,7 +190,7 @@ The service stack prints `Endpoint`, `ApiAccessSecretArn`, and operational resou
 
 The default `ReservedConcurrency=-1` omits a Lambda reservation and shares existing account capacity. The script does not request a quota increase. An optional positive `ASKBRIEVES_RESERVED_CONCURRENCY` setting reserves and limits function capacity when the regional account has enough available; the API throttle and daily request cap apply in either mode.
 
-Optional reviewer access uses `reviewer_token` and integer UTC epoch `reviewer_expires_at` fields in the same secret, preserving the existing owner `token`. Reviewer tokens accept 12–512 characters and require a future expiry; owner tokens remain 20–512 characters. Distribute values privately, never through this public repository. Both audiences share the global daily allowance. A memorable reviewer credential is suitable only for a short-lived, bounded demo; use high-entropy credentials for production.
+Optional reviewer access uses `reviewer_token` and integer UTC epoch `reviewer_expires_at` fields in the same secret, preserving the existing owner `token`. Reviewer tokens accept 12–512 characters and require a future expiry; owner tokens remain 20–512 characters. Generate reviewer values with at least 32 random bytes (for example, a 43-character URL-safe encoding), rather than choosing a memorable phrase. Distribute values privately, never through this public repository. Both audiences share the global daily allowance.
 
 ### Verify your deployment
 
@@ -207,7 +208,24 @@ subprocess.run([sys.executable, "scripts/smoke.py"], check=True)
 PY
 ```
 
-The live suite requires working AWS/provider configuration behind the endpoint, uses real OpenAI/Treasury calls, consumes **11 daily attempts**, and writes **11 synthetic history entries**. Use an operator/test audience rather than a fresh reviewer audience you want to hand over empty. `ASKBRIEVES_URL` is required for another deployment; otherwise the suite targets Brian's hosted service. A passing health check alone does not establish these dependencies are working.
+The baseline suite requires working AWS/provider configuration behind the endpoint, uses real OpenAI/Treasury calls, consumes **11 daily attempts**, and writes **11 synthetic history entries**. `ASKBRIEVES_URL` is required for another deployment; otherwise the suite targets Brian's hosted service. A passing health check alone does not establish these dependencies are working.
+
+For the additional seven explanations, latest/historical curve assessments, dated changes, refusals, and owner/reviewer isolation, run the optional extended suite with two distinct credentials:
+
+```bash
+ASKBRIEVES_URL=https://askbrieves.your-domain.com python - <<'PY'
+import getpass
+import os
+import subprocess
+import sys
+
+os.environ["ASKBRIEVES_TOKEN"] = getpass.getpass("Owner bearer token: ")
+os.environ["ASKBRIEVES_REVIEWER_TOKEN"] = getpass.getpass("Test reviewer bearer token: ")
+subprocess.run([sys.executable, "scripts/smoke_review.py"], check=True)
+PY
+```
+
+The extended suite adds **13 daily attempts and 13 reviewer history records**; it does not rerun the baseline or delete history. It requires a nonempty owner history so the isolation check has real evidence; run the baseline first on a fresh deployment. Both suites together consume 24 attempts. Use private test credentials, and clean up reviewer test history before handing over that audience. Never point the live suite at an audience whose existing history you intend to keep empty. See the [handoff verification](docs/verification-handoff.md) for the deployed check and cleanup evidence.
 
 See [operations](docs/operations.md) before changing quotas or credentials, stopping the function, rolling back an artifact, or deleting stacks. Retained data, secrets, artifacts, and DNS validation records require explicit cleanup after stack deletion.
 
@@ -215,6 +233,6 @@ See [operations](docs/operations.md) before changing quotas or credentials, stop
 
 The [reviewer capability verification](docs/verification-reviewer.md), [historical release proof](docs/verification-historical.md), and [initial deployment evidence](docs/verification.md) record dated tests, artifact digests, deployment readbacks, and sanitized request/log evidence. The reviewer release includes an offline Codex Security assessment with its scope and limitations. These are recorded observations, not a promise that an endpoint, credential, or dependency remains healthy today.
 
-Costs come from API/Lambda requests, DynamoDB requests/storage/PITR, two Secrets Manager secrets, logs, alarms, artifacts, and DNS. There is no NAT gateway, VPC, load balancer, container host, or database instance. The pinned model is `gpt-5.4-mini-2026-03-17`, with reasoning disabled for this small classification task. Review [current model pricing](https://developers.openai.com/api/docs/models/gpt-5.4-mini) and AWS pricing before raising the quota. Project budget alerts are useful but are not an application spending cutoff; unauthenticated traffic can still incur AWS request costs.
+Costs come from API/Lambda requests, DynamoDB requests/storage/PITR, two Secrets Manager secrets, logs, alarms, artifacts, and DNS. There is no NAT gateway, VPC, load balancer, container host, or database instance. The pinned model is `gpt-5.4-mini-2026-03-17`, with reasoning disabled for this small classification task. Review [current model pricing](https://developers.openai.com/api/docs/models/gpt-5.4-mini) and AWS pricing before raising the quota. OpenAI spend alerts do not stop traffic; an enforced hard spend limit on a dedicated project can stop affected model requests after tracked spend reaches the limit, with a possible small propagation overshoot. Confirm that setting separately in the provider console; this CloudFormation deployment does not configure it. [OpenAI spend limits](https://developers.openai.com/api/docs/guides/spend-limits). Neither provider controls nor the model quota cap AWS charges from unauthenticated traffic.
 
 The next investments follow the current limits: per-client identity and quotas for isolation, an appropriate edge abuse control for public traffic, owned paging and measured availability/latency objectives for operations, and a larger model-policy evaluation dataset before expanding scope. A cache or static CDN should follow observed source load or asset traffic. Multi-region infrastructure would add complexity before there is a demonstrated recovery or availability requirement.

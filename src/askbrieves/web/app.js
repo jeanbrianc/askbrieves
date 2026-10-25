@@ -4,9 +4,11 @@
   const conversation = $("conversation");
   const question = $("question");
   const dialog = $("access-dialog");
+  const initialEmptyState = $("empty-state").cloneNode(true);
   let token = "";
   let busy = false;
   let activeRequest = null;
+  let session = 0;
 
   function updateControls() {
     $("send-button").disabled = busy || !question.value.trim();
@@ -87,26 +89,61 @@
     conversation.scrollTop = conversation.scrollHeight;
     return article;
   }
-  function disconnect() {
-    token = "";
+  function bindSuggestions(root) {
+    root.querySelectorAll(".suggestion").forEach((button) => {
+      button.addEventListener("click", () => {
+        if (busy) return;
+        question.value = button.dataset.question || "";
+        updateControls();
+        question.focus();
+      });
+    });
+  }
+  function showEmptyState() {
+    conversation.replaceChildren(initialEmptyState.cloneNode(true));
+    bindSuggestions(conversation);
+  }
+  function resetSession(nextToken = "", preserveDraft = false) {
+    const draft = preserveDraft ? question.value : "";
+    // Invalidate callbacks before aborting: cancellation alone cannot revoke them.
+    session += 1;
+    const previousRequest = activeRequest;
+    activeRequest = null;
+    token = nextToken;
+    busy = false;
     $("access-token").value = "";
-    if (activeRequest) activeRequest.abort();
+    question.value = draft;
+    question.rows = Math.min(4, Math.max(1, draft.split("\n").length));
+    dialog.close();
+    showEmptyState();
+    showNotice("");
+    if (previousRequest) previousRequest.abort();
     updateControls();
   }
-  async function api(path, options = {}) {
+  function disconnect() {
+    resetSession();
+  }
+  async function api(path, options = {}, requestSession = session) {
+    if (requestSession !== session) throw new Error("Session changed.");
     const controller = new AbortController();
     activeRequest = controller;
     const timeout = setTimeout(() => controller.abort(), 35000);
     try {
       const response = await fetch(path, {...options, headers: {"Content-Type": "application/json", "Authorization": `Bearer ${token}`}, cache: "no-store", redirect: "error", credentials: "omit", signal: controller.signal});
+      if (requestSession !== session) throw new Error("Session changed.");
       if (response.status === 401) {
         disconnect();
+        showNotice("Access token not accepted. Reconnect to try again.", true);
         throw new Error("Access token not accepted. Reconnect to try again.");
       }
       if (response.status === 429) throw new Error("Request limit reached. Please try later; the daily limit resets at midnight UTC.");
       if (response.status === 503) throw new Error("Rates are unavailable right now. Please try again shortly.");
       if (!response.ok) throw new Error("Couldn’t complete that request. Please try again.");
-      try { return await response.json(); }
+      try {
+        const data = await response.json();
+        if (requestSession !== session) throw new Error("Session changed.");
+        return data;
+      }
       catch (_) { throw new Error("Unexpected response. Please try again."); }
     } catch (error) {
       if (error.name === "AbortError") throw new Error("Request interrupted. Try again when you’re ready.");
@@ -123,13 +160,15 @@
   $("access-form").addEventListener("submit", (event) => {
     event.preventDefault();
     const value = $("access-token").value.trim();
-    if (!value || busy) return;
-    token = value;
+    if (!value) return;
+    // A draft written while disconnected belongs to the new session. Replacing
+    // an existing credential must discard all content owned by that audience.
+    if (value !== token) resetSession(value, !token);
     $("access-token").value = "";
     dialog.close();
-    showNotice("Ready. Press send to ask.");
+    if (!busy) showNotice("Ready. Press send to ask.");
     updateControls();
-    question.focus();
+    if (!busy) question.focus();
   });
   $("disconnect-button").addEventListener("click", () => {
     disconnect();
@@ -146,19 +185,13 @@
       if (!$("send-button").disabled) $("question-form").requestSubmit();
     }
   });
-  document.querySelectorAll(".suggestion").forEach((button) => {
-    button.addEventListener("click", () => {
-      if (busy) return;
-      question.value = button.dataset.question || "";
-      updateControls();
-      question.focus();
-    });
-  });
+  bindSuggestions(document);
   $("question-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     const text = question.value.trim();
     if (busy || !text || text.length > 500) return;
     if (!token) { openAccess(); return; }
+    const requestSession = session;
     busy = true;
     showNotice("");
     addMessage("user", text);
@@ -168,32 +201,38 @@
     thinking.classList.add("thinking");
     updateControls();
     try {
-      const data = await api("/questions", {method: "POST", body: JSON.stringify({question: text.replace(/[\r\n\t]+/g, " ")})});
+      const data = await api("/questions", {method: "POST", body: JSON.stringify({question: text.replace(/[\r\n\t]+/g, " ")})}, requestSession);
+      if (requestSession !== session) return;
       thinking.remove();
       addMessage("assistant", data.answer, {evidence: data.evidence});
     } catch (error) {
+      if (requestSession !== session) return;
       thinking.remove();
       addMessage("assistant", error.message, {error: true});
       if (!question.value) question.value = text;
       showNotice("Question restored. Send again to retry.", true);
     } finally {
-      busy = false;
-      updateControls();
-      question.focus();
+      if (requestSession === session) {
+        busy = false;
+        updateControls();
+        question.focus();
+      }
     }
   });
   $("history-button").addEventListener("click", async () => {
     if (busy) return;
     if (!token) { openAccess(); return; }
+    const requestSession = session;
     busy = true;
     showNotice("Loading history…");
     updateControls();
     try {
-      const data = await api("/history");
+      const data = await api("/history", {}, requestSession);
+      if (requestSession !== session) return;
       if (!Array.isArray(data.items)) throw new Error("History unavailable.");
+      showEmptyState();
       if (!data.items.length) showNotice("No history yet.");
       else {
-        conversation.replaceChildren();
         data.items.slice(0, 20).reverse().forEach((item) => {
           if (!item || typeof item !== "object") return;
           addMessage("user", item.question);
@@ -201,25 +240,18 @@
         });
         showNotice("Recent questions · Shared demo history");
       }
-    } catch (error) { showNotice(error.message, true); }
-    finally { busy = false; updateControls(); }
+    } catch (error) {
+      if (requestSession === session) showNotice(error.message, true);
+    } finally {
+      if (requestSession === session) { busy = false; updateControls(); }
+    }
   });
-  const initialEmptyState = $("empty-state").cloneNode(true);
   $("clear-button").addEventListener("click", () => {
     if (busy) return;
-    conversation.replaceChildren(initialEmptyState.cloneNode(true));
-    conversation.querySelectorAll(".suggestion").forEach((button) => button.addEventListener("click", () => {
-      question.value = button.dataset.question || "";
-      updateControls();
-      question.focus();
-    }));
+    showEmptyState();
     showNotice("");
   });
-  window.addEventListener("pagehide", () => {
-    token = "";
-    $("access-token").value = "";
-    if (activeRequest) activeRequest.abort();
-  });
+  window.addEventListener("pagehide", disconnect);
   window.addEventListener("pageshow", updateControls);
   updateControls();
 })();
