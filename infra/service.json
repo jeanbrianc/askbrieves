@@ -31,6 +31,12 @@
       "MaxValue": 1000,
       "Description": "Global UTC daily limit on authenticated model attempts, including declined questions."
     },
+    "ReservedConcurrency": {
+      "Type": "Number",
+      "Default": 2,
+      "AllowedValues": [-1, 1, 2, 3, 4, 5, 10],
+      "Description": "Function concurrency reservation; -1 omits the reservation and uses the existing shared account quota."
+    },
     "HistoryDays": {
       "Type": "Number",
       "Default": 30,
@@ -70,7 +76,8 @@
     }
   },
   "Conditions": {
-    "HasCustomDomain": {"Fn::Not": [{"Fn::Equals": [{"Ref": "DomainName"}, ""]}]}
+    "HasCustomDomain": {"Fn::Not": [{"Fn::Equals": [{"Ref": "DomainName"}, ""]}]},
+    "HasReservedConcurrency": {"Fn::Not": [{"Fn::Equals": [{"Ref": "ReservedConcurrency"}, "-1"]}]}
   },
   "Resources": {
     "History": {
@@ -176,7 +183,7 @@
         "Handler": "askbrieves.handler.lambda_handler",
         "MemorySize": 256,
         "Timeout": 28,
-        "ReservedConcurrentExecutions": 2,
+        "ReservedConcurrentExecutions": {"Fn::If": ["HasReservedConcurrency", {"Ref": "ReservedConcurrency"}, {"Ref": "AWS::NoValue"}]},
         "Role": {"Fn::GetAtt": ["FunctionRole", "Arn"]},
         "Code": {
           "S3Bucket": {"Ref": "ArtifactBucket"},

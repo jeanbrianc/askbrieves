@@ -7,6 +7,7 @@ task_secret="${2:?same-region OpenAI secret ARN required}"
 task_zone="${3:?public Route 53 hosted zone ID required}"
 task_domain="${4:-askbrieves.brianjeanbuilds.com}"
 task_stack="${ASKBRIEVES_STACK:-askbrieves}"
+task_concurrency="${ASKBRIEVES_RESERVED_CONCURRENCY:-2}"
 cd "$(dirname "$0")/.."
 python3 -m pytest -q
 cfn-lint infra/bootstrap.json infra/service.json
@@ -22,6 +23,7 @@ aws cloudformation deploy --region "$task_region" --stack-name "$task_stack" \
   --template-file infra/service.json --capabilities CAPABILITY_IAM --no-fail-on-empty-changeset \
   --parameter-overrides "ArtifactBucket=${task_bucket}" "ArtifactKey=${task_key}" \
     "OpenAISecretArn=${task_secret}" "HostedZoneId=${task_zone}" "DomainName=${task_domain}" \
+    "ReservedConcurrency=${task_concurrency}" \
   --tags Application=askbrieves
 aws cloudformation describe-stacks --region "$task_region" --stack-name "$task_stack" \
   --query 'Stacks[0].Outputs' --output table
